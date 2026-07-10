@@ -6,6 +6,12 @@ Hybrid token-efficient routing for the **AMD Developer Hackathon Track 1**.
 
 **Why it exists:** cut remote token cost and latency on simple tasks while keeping stronger models available when quality matters.
 
+## Demo
+
+[Watch the demo video](./docs/demo.mp4)
+
+<video src="./docs/demo.mp4" controls width="720"></video>
+
 ## Repository layout
 
 | Path | Purpose |
@@ -14,6 +20,7 @@ Hybrid token-efficient routing for the **AMD Developer Hackathon Track 1**.
 | `hybrid-routing-agent/` | Local-first router (scoring, Ollama, verifier, Fireworks) |
 | `backend-api/` | FastAPI bridge: `POST /api/route` → router |
 | `UI/` | React/Vite ChatGPT-style demo |
+| `docs/demo.mp4` | Short product demo video |
 | `RUN-DEMO.md` | Short “already set up” checklist |
 
 ---

@@ -1,7 +1,5 @@
 # HybridRoute
 
-Hybrid token-efficient routing for the **AMD Developer Hackathon Track 1**.
-
 **What it does:** classifies each prompt by workload, answers easy work on a **local** model (Ollama), and escalates hard or high-risk work to a **hosted** Fireworks model. A React demo UI shows the reply in the same chat thread, plus route (Local/Hosted), model name, runtime, and remote tokens used.
 
 **Why it exists:** cut remote token cost and latency on simple tasks while keeping stronger models available when quality matters.

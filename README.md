@@ -6,14 +6,11 @@
 
 ## Demo
 
-> GitHub README cannot embed a raw `.mp4` player (it only offers a download link).  
-> Use the hosted player below — the video streams in your browser.
 
-**[▶ Play demo](https://est4ever.github.io/HybridRoute/)**
+https://github.com/user-attachments/assets/01249fc8-116f-4055-8b91-ff7b706ff2a2
 
-[![HybridRoute demo](./docs/demo-poster.jpg)](https://est4ever.github.io/HybridRoute/)
 
-If the link is not live yet, open [`docs/index.html`](./docs/index.html) after enabling GitHub Pages, or run the `Deploy demo pages` workflow.
+
 
 ## Repository layout
 

@@ -6,9 +6,14 @@
 
 ## Demo
 
-[Watch the demo video](./docs/demo.mp4)
+> GitHub README cannot embed a raw `.mp4` player (it only offers a download link).  
+> Use the hosted player below — the video streams in your browser.
 
-<video src="./docs/demo.mp4" controls width="720"></video>
+**[▶ Play demo](https://est4ever.github.io/HybridRoute/)**
+
+[![HybridRoute demo](./docs/demo-poster.jpg)](https://est4ever.github.io/HybridRoute/)
+
+If the link is not live yet, open [`docs/index.html`](./docs/index.html) after enabling GitHub Pages, or run the `Deploy demo pages` workflow.
 
 ## Repository layout
 
@@ -18,7 +23,7 @@
 | `hybrid-routing-agent/` | Local-first router (scoring, Ollama, verifier, Fireworks) |
 | `backend-api/` | FastAPI bridge: `POST /api/route` → router |
 | `UI/` | React/Vite ChatGPT-style demo |
-| `docs/demo.mp4` | Short product demo video |
+| `docs/` | Demo video + browser player (`index.html`) |
 | `RUN-DEMO.md` | Short “already set up” checklist |
 
 ---

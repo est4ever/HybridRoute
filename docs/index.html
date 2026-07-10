@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HybridRoute Demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070b14;
+      --panel: #101826;
+      --text: #e8eefc;
+      --muted: #9aa8c7;
+      --accent: #3b82f6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background:
+        radial-gradient(1200px 600px at 20% -10%, #1e3a8a55, transparent),
+        radial-gradient(900px 500px at 90% 10%, #0ea5e933, transparent),
+        var(--bg);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    main {
+      width: min(960px, 100%);
+      background: color-mix(in oklab, var(--panel) 88%, black);
+      border: 1px solid #ffffff14;
+      border-radius: 18px;
+      padding: 20px;
+      box-shadow: 0 24px 80px #00000066;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 1.35rem;
+      letter-spacing: -0.02em;
+    }
+    p {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    video {
+      width: 100%;
+      border-radius: 12px;
+      background: #000;
+      display: block;
+    }
+    .actions {
+      margin-top: 14px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 0.9rem;
+    }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>HybridRoute demo</h1>
+    <p>Local vs hosted routing — plays in the browser (no download needed).</p>
+    <video
+      controls
+      playsinline
+      preload="metadata"
+      poster="./demo-poster.jpg"
+      src="./demo.mp4"
+    >
+      Your browser does not support HTML video.
+    </video>
+    <div class="actions">
+      <a href="https://github.com/est4ever/HybridRoute">GitHub repo</a>
+    </div>
+  </main>
+</body>
+</html>

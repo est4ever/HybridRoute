@@ -1,0 +1,48 @@
+# Secrets
+.env
+.env.*
+!.env.example
+**/.env
+!**/.env.example
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.venv/
+**/venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# Node / frontend
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Logs & runtime output
+**/logs/
+**/*.log
+hybridroute-track1/output/
+backend-api/logs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Cursor / local tooling
+.cursor/
+*.pyc

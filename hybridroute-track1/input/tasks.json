@@ -1,0 +1,34 @@
+[
+  {
+    "task_id": "t1",
+    "prompt": "What is the capital of Australia?"
+  },
+  {
+    "task_id": "t2",
+    "prompt": "A store sells notebooks for $4 each. If you buy 7 notebooks and pay with a $50 bill, how much change do you receive?"
+  },
+  {
+    "task_id": "t3",
+    "prompt": "Classify the sentiment as positive, negative, neutral, or mixed: I like the product quality, but delivery was late."
+  },
+  {
+    "task_id": "t4",
+    "prompt": "Summarise the following text in one sentence: AI agents can automate repetitive workflows by planning steps, calling tools, and validating outputs."
+  },
+  {
+    "task_id": "t5",
+    "prompt": "Extract named entities from this text and return JSON only: On 12 May 2024, Maria Lopez joined OpenAI in San Francisco."
+  },
+  {
+    "task_id": "t6",
+    "prompt": "Debug this Python code and provide corrected code:\ndef add_items(items):\n    total = 0\n    for i in range(len(items) + 1):\n        total += items[i]\n    return total"
+  },
+  {
+    "task_id": "t7",
+    "prompt": "Logic puzzle: Alice, Bob, and Carol sit left to right. Alice is not on the right. Bob is in the middle. Who sits on the left?"
+  },
+  {
+    "task_id": "t8",
+    "prompt": "Write a function called is_palindrome(s) that returns True if a string is a palindrome and False otherwise."
+  }
+]

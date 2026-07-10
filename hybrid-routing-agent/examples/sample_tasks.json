@@ -1,0 +1,18 @@
+[
+  {
+    "id": "task_001",
+    "task": "Summarize this in one sentence: AI agents can reduce repetitive work by planning steps, calling tools, and checking results."
+  },
+  {
+    "id": "task_002",
+    "task": "Classify the sentiment as positive, neutral, or negative: I like the idea, but the setup process is confusing."
+  },
+  {
+    "id": "task_003",
+    "task": "Return valid JSON with fields topic and difficulty for this text: Kubernetes can be used to deploy scalable AI services."
+  },
+  {
+    "id": "task_004",
+    "task": "Explain why a local-first routing agent can reduce remote LLM token usage while preserving accuracy."
+  }
+]

@@ -27,7 +27,12 @@ from code_exec import (
     smoke_call,
 )
 from local_solvers import try_local_solve
-from local_llm import answer_with_local_llm, local_llm_available
+from local_llm import (
+    answer_with_local_llm,
+    local_code_answer,
+    local_llm_available,
+    local_program_of_thought,
+)
 
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
@@ -454,29 +459,45 @@ def process_task(
         LOCAL_SOLVES += 1
         return {"task_id": task["task_id"], "answer": local_answer}
 
-    # Bundled GGUF path — still zero Fireworks tokens.
-    if local_llm_available() and not over_budget(40.0):
-        llm_max = min(max_tokens_for_task(task_type, prompt), 280)
-        raw_local = answer_with_local_llm(task_type, prompt, max_tokens=llm_max)
-        if raw_local:
-            cleaned_local = clean_answer(raw_local, task_type)
-            if _looks_valid_answer(cleaned_local, task_type, prompt):
-                # For code, require compile when possible.
-                if task_type in {"code_generation", "code_debugging"}:
-                    code = extract_code(cleaned_local)
-                    if code and compile_ok(code):
-                        LOCAL_LLM_SOLVES += 1
-                        if task_type == "code_debugging" and "Bug:" not in cleaned_local:
-                            cleaned_local = (
-                                "Bug: Fixed incorrect logic in the provided implementation.\n\n"
-                                f"Corrected code:\n{code}"
-                            )
-                        elif task_type == "code_generation":
-                            cleaned_local = code
-                        return {"task_id": task["task_id"], "answer": cleaned_local}
-                else:
+    # --- Zero-token local LLM path (bundled GGUF) ---
+    if local_llm_available() and not over_budget(45.0):
+        # Verified program-of-thought for math/logic.
+        if task_type in {"math", "logic"} and os.environ.get("ENABLE_LOCAL_POT", "1") not in {
+            "0",
+            "false",
+            "no",
+        }:
+            pot_local = local_program_of_thought(task_type, prompt)
+            if pot_local and _looks_valid_answer(pot_local, task_type, prompt):
+                LOCAL_LLM_SOLVES += 1
+                return {"task_id": task["task_id"], "answer": pot_local}
+
+        # Code with compile gate.
+        if task_type in {"code_generation", "code_debugging"}:
+            code_local = local_code_answer(task_type, prompt)
+            if code_local and _looks_valid_answer(code_local, task_type, prompt):
+                LOCAL_LLM_SOLVES += 1
+                return {"task_id": task["task_id"], "answer": code_local}
+
+        # Language / factual direct generation.
+        if task_type not in {"math", "logic", "code_generation", "code_debugging"}:
+            llm_max = min(max_tokens_for_task(task_type, prompt), 280)
+            raw_local = answer_with_local_llm(task_type, prompt, max_tokens=llm_max)
+            if raw_local:
+                cleaned_local = clean_answer(raw_local, task_type)
+                if _looks_valid_answer(cleaned_local, task_type, prompt):
                     LOCAL_LLM_SOLVES += 1
                     return {"task_id": task["task_id"], "answer": cleaned_local}
+
+    # Moonshot: never spend Fireworks tokens (accuracy risk; best token score if it passes).
+    mode = os.environ.get("MODE", "hybrid").strip().lower()
+    if mode in {"moonshot", "local_only", "zero"}:
+        if task_type == "sentiment":
+            return {"task_id": task["task_id"], "answer": _sentiment_fallback(prompt)}
+        return {
+            "task_id": task["task_id"],
+            "answer": local_answer or FALLBACK_ANSWER,
+        }
 
     candidates = [
         c
@@ -774,6 +795,15 @@ def main() -> int:
         api_key, base_url, allowed_models = load_env()
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=45.0)
         tasks = load_tasks()
+        # Warm local GGUF during startup so first hard task does not stall.
+        if local_llm_available():
+            try:
+                from local_llm import _get_llm
+
+                _get_llm()
+                print("[local_llm] warmed", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[local_llm] warm failed: {exc}", file=sys.stderr)
         # Seed full fallback sheet immediately so a kill still leaves scorable output
         # if the harness snapshots the mount (best-effort).
         results = [

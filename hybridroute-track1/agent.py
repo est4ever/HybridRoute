@@ -249,24 +249,24 @@ def ranked_models(task_type: str, allowed_models: list[str]) -> list[str]:
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
     text = prompt.lower()
     if task_type == "sentiment":
-        return 80
+        return 48
     if task_type == "summarization":
         if "bullet" in text or "detailed" in text or "paragraph" in text:
-            return 260
-        return 160
+            return 180
+        return 100
     if task_type == "ner":
-        return 240
+        return 160
     if task_type == "factual":
-        return 180
+        return 100
     if task_type == "math":
-        return 280
+        return 160
     if task_type == "logic":
-        return 360
+        return 200
     if task_type == "code_debugging":
-        return 500
+        return 360
     if task_type == "code_generation":
-        return 560
-    return 200
+        return 400
+    return 120
 
 
 def resolve_api_model(model: str) -> str:

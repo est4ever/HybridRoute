@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import operator
+import os
 import re
 from typing import Callable
 
@@ -73,7 +74,7 @@ CAPITALS: dict[str, str] = {
 POSITIVE = {
     "good", "great", "excellent", "love", "amazing", "satisfied", "fast", "helpful",
     "smooth", "best", "happy", "wonderful", "awesome", "fantastic", "perfect", "nice",
-    "like", "enjoy", "pleasant", "recommend", "impressed", "quality",
+    "enjoy", "pleasant", "recommend", "impressed",
 }
 NEGATIVE = {
     "bad", "poor", "terrible", "hate", "awful", "slow", "bug", "broken", "scratch",
@@ -91,16 +92,32 @@ _OPS: dict[str, Callable[[float, float], float]] = {
 
 
 def try_local_solve(task_type: str, prompt: str) -> str | None:
-    handlers = {
+    """
+    High-confidence zero-token solvers only.
+    Brittle heuristics (NER / free summarization / open logic) are disabled —
+    wrong local answers caused accuracy-gate failure on the real eval set.
+    """
+    mode = os.environ.get("LOCAL_SOLVER_MODE", "off").strip().lower()
+    if mode in {"off", "0", "false", "no", ""}:
+        return None
+
+    # "safe" = only high-precision pattern solvers. "all" re-enables risky ones.
+    safe_handlers = {
         "sentiment": _solve_sentiment,
         "math": _solve_math,
         "factual": _solve_factual,
-        "summarization": _solve_summarization,
-        "ner": _solve_ner,
-        "logic": _solve_logic,
         "code_debugging": _solve_code_debugging,
         "code_generation": _solve_code_generation,
     }
+    risky_handlers = {
+        "summarization": _solve_summarization,
+        "ner": _solve_ner,
+        "logic": _solve_logic,
+    }
+    handlers = dict(safe_handlers)
+    if mode == "all":
+        handlers.update(risky_handlers)
+
     handler = handlers.get(task_type)
     if handler is None:
         return None
@@ -118,7 +135,9 @@ def _solve_sentiment(prompt: str) -> str | None:
     text = body.lower()
     pos = sum(1 for w in POSITIVE if re.search(rf"\b{re.escape(w)}\b", text))
     neg = sum(1 for w in NEGATIVE if re.search(rf"\b{re.escape(w)}\b", text))
-    # Contrast cues strongly suggest mixed.
+    # Require at least one clear signal; otherwise defer to Fireworks.
+    if pos == 0 and neg == 0:
+        return None
     if re.search(r"\b(but|however|although|though|yet)\b", text) and pos > 0 and neg > 0:
         return "Mixed - Contains both positive and negative signals."
     if pos > 0 and neg > 0:
@@ -127,7 +146,7 @@ def _solve_sentiment(prompt: str) -> str | None:
         return "Positive - Overall sentiment is favorable."
     if neg > 0:
         return "Negative - Overall sentiment is unfavorable."
-    return "Neutral - Sentiment is unclear or balanced."
+    return None
 
 
 def _solve_math(prompt: str) -> str | None:

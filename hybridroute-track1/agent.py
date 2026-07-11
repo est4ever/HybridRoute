@@ -20,25 +20,34 @@ LOCAL_SOLVES = 0
 from local_solvers import try_local_solve  # noqa: E402
 
 SYSTEM_PROMPTS = {
-    "factual": "Answer in one short sentence. No preamble.",
-    "math": "Give the final numeric answer first, then at most 2 short calculation lines.",
+    "factual": "Answer accurately and concisely in one or two short sentences. No preamble.",
+    "math": (
+        "Solve carefully. Put the final numeric answer first, then brief calculation steps. "
+        "Do not omit the final number."
+    ),
     "sentiment": (
-        "Classify as Positive, Negative, Neutral, or Mixed. "
-        "One line only: <Label> - <short reason>."
+        "Classify sentiment as Positive, Negative, Neutral, or Mixed. "
+        "Output exactly one line: <Label> - <short reason>."
     ),
     "summarization": (
-        "Obey length/format constraints exactly. No extra commentary."
+        "Summarize exactly as requested. Obey all length, sentence, bullet, and format "
+        "constraints. Do not add extra commentary."
     ),
     "ner": (
-        'Return JSON only: '
+        'Extract named entities. Return valid JSON only: '
         '[{"text":"...","type":"PERSON|ORG|LOCATION|DATE|MONEY|PRODUCT|EVENT|OTHER"}].'
     ),
     "code_debugging": (
-        "Plain text only. Format: Bug: ... Corrected code: ..."
+        "Identify the bug briefly and provide corrected code. Plain text only. "
+        "Format: Bug: ... Corrected code: ..."
     ),
-    "logic": "Final answer first, then 2-4 short reasoning bullets.",
+    "logic": (
+        "Solve the constraints carefully. Give a clear final answer first, "
+        "then short reasoning."
+    ),
     "code_generation": (
-        "Return code only. No markdown fences. No explanation unless required."
+        "Write correct code that satisfies the spec. "
+        "Return only code unless an explanation is explicitly required. No markdown fences."
     ),
 }
 
@@ -235,24 +244,24 @@ def build_messages(task_type: str, prompt: str) -> list[dict[str, str]]:
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
     text = prompt.lower()
     if task_type == "sentiment":
-        return 40
+        return 60
     if task_type == "summarization":
         if "bullet" in text or "detailed summary" in text or "paragraph" in text:
-            return 160
-        return 90
+            return 220
+        return 140
     if task_type == "ner":
-        return 120
+        return 200
     if task_type == "factual":
-        return 80
-    if task_type == "math":
-        return 120
-    if task_type == "logic":
         return 160
-    if task_type == "code_debugging":
+    if task_type == "math":
+        return 200
+    if task_type == "logic":
         return 280
+    if task_type == "code_debugging":
+        return 420
     if task_type == "code_generation":
-        return 320
-    return 100
+        return 480
+    return 180
 
 
 def compress_user_prompt(prompt: str, task_type: str) -> str:
@@ -471,7 +480,7 @@ def process_task(
     user_prompt = compress_user_prompt(task["prompt"], task_type)
 
     answer = FALLBACK_ANSWER
-    max_fallbacks = int(os.environ.get("MAX_MODEL_FALLBACKS", "3"))
+    max_fallbacks = int(os.environ.get("MAX_MODEL_FALLBACKS", "4"))
     max_fallbacks = max(1, min(max_fallbacks, len(candidates)))
 
     for attempt, candidate in enumerate(candidates[:max_fallbacks], start=1):

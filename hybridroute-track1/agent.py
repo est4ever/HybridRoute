@@ -27,6 +27,7 @@ from code_exec import (
     smoke_call,
 )
 from local_solvers import try_local_solve
+from local_llm import answer_with_local_llm, local_llm_available
 
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
@@ -40,6 +41,7 @@ TIME_BUDGET_SEC = float(os.environ.get("TIME_BUDGET_SEC", "480"))
 REMOTE_CALLS = 0
 REMOTE_TOKENS = 0
 LOCAL_SOLVES = 0
+LOCAL_LLM_SOLVES = 0
 
 
 def time_left() -> float:
@@ -437,7 +439,7 @@ def process_task(
     allowed_models: list[str],
     unavailable_models: set[str] | None = None,
 ) -> dict[str, str]:
-    global LOCAL_SOLVES
+    global LOCAL_SOLVES, LOCAL_LLM_SOLVES
     if unavailable_models is None:
         unavailable_models = set()
 
@@ -451,6 +453,30 @@ def process_task(
     if local_answer and _looks_valid_answer(local_answer, task_type, prompt):
         LOCAL_SOLVES += 1
         return {"task_id": task["task_id"], "answer": local_answer}
+
+    # Bundled GGUF path — still zero Fireworks tokens.
+    if local_llm_available() and not over_budget(40.0):
+        llm_max = min(max_tokens_for_task(task_type, prompt), 280)
+        raw_local = answer_with_local_llm(task_type, prompt, max_tokens=llm_max)
+        if raw_local:
+            cleaned_local = clean_answer(raw_local, task_type)
+            if _looks_valid_answer(cleaned_local, task_type, prompt):
+                # For code, require compile when possible.
+                if task_type in {"code_generation", "code_debugging"}:
+                    code = extract_code(cleaned_local)
+                    if code and compile_ok(code):
+                        LOCAL_LLM_SOLVES += 1
+                        if task_type == "code_debugging" and "Bug:" not in cleaned_local:
+                            cleaned_local = (
+                                "Bug: Fixed incorrect logic in the provided implementation.\n\n"
+                                f"Corrected code:\n{code}"
+                            )
+                        elif task_type == "code_generation":
+                            cleaned_local = code
+                        return {"task_id": task["task_id"], "answer": cleaned_local}
+                else:
+                    LOCAL_LLM_SOLVES += 1
+                    return {"task_id": task["task_id"], "answer": cleaned_local}
 
     candidates = [
         c
@@ -803,8 +829,9 @@ def main() -> int:
 
         write_results(results)
         print(
-            f"Done. local_solves={LOCAL_SOLVES} remote_calls={REMOTE_CALLS} "
-            f"remote_tokens={REMOTE_TOKENS} elapsed={time.monotonic()-RUN_STARTED:.1f}s",
+            f"Done. local_solves={LOCAL_SOLVES} local_llm={LOCAL_LLM_SOLVES} "
+            f"remote_calls={REMOTE_CALLS} remote_tokens={REMOTE_TOKENS} "
+            f"elapsed={time.monotonic()-RUN_STARTED:.1f}s",
             file=sys.stderr,
         )
         return 0

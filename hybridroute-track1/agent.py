@@ -7,36 +7,38 @@ from typing import Any
 
 from openai import OpenAI
 
-INPUT_PATH = "/input/tasks.json"
-OUTPUT_PATH = "/output/results.json"
+INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
+OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 FALLBACK_ANSWER = "Unable to complete this task due to an inference error."
 EMPTY_ANSWER = "No answer generated."
 
+# Process-wide counters for local testing / logs (Fireworks usage only).
+REMOTE_CALLS = 0
+REMOTE_TOKENS = 0
+LOCAL_SOLVES = 0
+
+from local_solvers import try_local_solve  # noqa: E402
+
 SYSTEM_PROMPTS = {
-    "factual": "Answer accurately and concisely. Avoid unnecessary detail.",
-    "math": "Solve accurately. Show only necessary calculation steps and the final answer.",
+    "factual": "Answer in one short sentence. No preamble.",
+    "math": "Give the final numeric answer first, then at most 2 short calculation lines.",
     "sentiment": (
-        "Classify sentiment as Positive, Negative, Neutral, or Mixed. "
-        "Answer in this exact format: <Label> - <short reason>. "
-        "Output one line only and start with the label."
+        "Classify as Positive, Negative, Neutral, or Mixed. "
+        "One line only: <Label> - <short reason>."
     ),
     "summarization": (
-        "Summarize exactly as requested. Obey all length, sentence, bullet, and format "
-        "constraints. Do not add extra commentary."
+        "Obey length/format constraints exactly. No extra commentary."
     ),
     "ner": (
-        'Extract named entities. Return valid JSON only. Format: '
+        'Return JSON only: '
         '[{"text":"...","type":"PERSON|ORG|LOCATION|DATE|MONEY|PRODUCT|EVENT|OTHER"}].'
     ),
     "code_debugging": (
-        "Debug the code. Identify the bug briefly and provide corrected code. "
-        "Be concise. Return plain text only (no markdown fences). "
-        "Format: Bug: ... Corrected code: ..."
+        "Plain text only. Format: Bug: ... Corrected code: ..."
     ),
-    "logic": "Solve the constraints carefully. Give concise reasoning and a clear final answer.",
+    "logic": "Final answer first, then 2-4 short reasoning bullets.",
     "code_generation": (
-        "Write correct, clean code that satisfies the spec. "
-        "Return only code (no markdown fences, no extra prose) unless explanation is required."
+        "Return code only. No markdown fences. No explanation unless required."
     ),
 }
 
@@ -233,24 +235,46 @@ def build_messages(task_type: str, prompt: str) -> list[dict[str, str]]:
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
     text = prompt.lower()
     if task_type == "sentiment":
-        return 60
+        return 40
     if task_type == "summarization":
         if "bullet" in text or "detailed summary" in text or "paragraph" in text:
-            return 220
-        return 140
+            return 160
+        return 90
     if task_type == "ner":
-        return 180
+        return 120
     if task_type == "factual":
-        return 180
+        return 80
     if task_type == "math":
-        return 220
+        return 120
     if task_type == "logic":
-        return 320
+        return 160
     if task_type == "code_debugging":
-        return 450
+        return 280
     if task_type == "code_generation":
-        return 520
-    return 180
+        return 320
+    return 100
+
+
+def compress_user_prompt(prompt: str, task_type: str) -> str:
+    """Light compression before remote calls to cut billed prompt tokens."""
+    text = prompt.strip()
+    # Collapse excess whitespace.
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    if task_type == "sentiment" and ":" in text:
+        label, body = text.split(":", 1)
+        if "sentiment" in label.lower():
+            return f"Sentiment (Positive/Negative/Neutral/Mixed): {body.strip()}"
+    if task_type in {"summarization", "ner"} and ":" in text:
+        # Keep instruction short + passage.
+        parts = text.split(":", 1)
+        if len(parts[1].strip()) > 40:
+            short_inst = {
+                "summarization": "Summarize as requested",
+                "ner": "Extract entities as JSON list",
+            }[task_type]
+            return f"{short_inst}: {parts[1].strip()}"
+    return text
 
 
 def resolve_api_model(model: str) -> str:
@@ -266,6 +290,7 @@ def call_fireworks(
     messages: list[dict[str, str]],
     max_tokens: int,
 ) -> str:
+    global REMOTE_CALLS, REMOTE_TOKENS
     api_model = resolve_api_model(model)
     last_error: Exception | None = None
     for _ in range(2):
@@ -276,6 +301,12 @@ def call_fireworks(
                 max_tokens=max_tokens,
                 temperature=0,
             )
+            REMOTE_CALLS += 1
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                total = getattr(usage, "total_tokens", None)
+                if isinstance(total, int):
+                    REMOTE_TOKENS += total
             message = response.choices[0].message
             content = message.content
             if content is None or not str(content).strip():
@@ -410,29 +441,42 @@ def process_task(
     allowed_models: list[str],
     unavailable_models: set[str] | None = None,
 ) -> dict[str, str]:
+    global LOCAL_SOLVES
     if unavailable_models is None:
         unavailable_models = set()
 
     task_type = classify_task(task["prompt"])
+
+    # Zero-token path first (allowed by Track 1 rules).
+    local_answer = try_local_solve(task_type, task["prompt"])
+    if local_answer and _looks_valid_answer(local_answer, task_type, task["prompt"]):
+        LOCAL_SOLVES += 1
+        return {"task_id": task["task_id"], "answer": local_answer}
+
     model = choose_model(task_type, task["prompt"], allowed_models)
     candidates = ranked_models(task_type, allowed_models)
     if model in candidates:
         candidates.remove(model)
     candidates.insert(0, model)
     # Skip models already known unavailable in this container run.
-    candidates = [c for c in candidates if c not in unavailable_models and resolve_api_model(c) not in unavailable_models]
+    candidates = [
+        c
+        for c in candidates
+        if c not in unavailable_models and resolve_api_model(c) not in unavailable_models
+    ]
     if not candidates:
         candidates = list(allowed_models)
 
     max_tokens = max_tokens_for_task(task_type, task["prompt"])
+    user_prompt = compress_user_prompt(task["prompt"], task_type)
 
     answer = FALLBACK_ANSWER
-    max_fallbacks = int(os.environ.get("MAX_MODEL_FALLBACKS", "4"))
+    max_fallbacks = int(os.environ.get("MAX_MODEL_FALLBACKS", "3"))
     max_fallbacks = max(1, min(max_fallbacks, len(candidates)))
 
     for attempt, candidate in enumerate(candidates[:max_fallbacks], start=1):
         try:
-            messages = build_messages(task_type, task["prompt"])
+            messages = build_messages(task_type, user_prompt)
             if attempt > 1:
                 messages[0]["content"] += (
                     " Previous answer quality was weak or format-invalid. "
@@ -456,6 +500,14 @@ def process_task(
         or "unable to infer sentiment" in answer.lower()
     ):
         answer = _sentiment_fallback(task["prompt"])
+
+    # If remote failed but a weaker local answer exists, use it.
+    if (
+        answer in {FALLBACK_ANSWER, EMPTY_ANSWER}
+        and local_answer
+        and str(local_answer).strip()
+    ):
+        answer = local_answer
 
     # Never return an empty answer object — harness expects task_id + answer.
     if not str(answer).strip():
@@ -595,6 +647,11 @@ def main() -> int:
             ]
 
         write_results(results)
+        print(
+            f"Done. local_solves={LOCAL_SOLVES} remote_calls={REMOTE_CALLS} "
+            f"remote_tokens={REMOTE_TOKENS}",
+            file=sys.stderr,
+        )
         return 0
     except Exception as exc:
         print(f"Fatal error: {exc}", file=sys.stderr)

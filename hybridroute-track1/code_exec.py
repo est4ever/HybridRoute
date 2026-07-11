@@ -12,13 +12,12 @@ import textwrap
 _CODE_BLOCK_RE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _DEF_RE = re.compile(r"(?m)^(def\s+\w+\s*\(.*)", re.DOTALL)
 
+# Soft CPU cap only — do NOT set RLIMIT_AS (can OOM/kill oddly in 4GB harness boxes).
 _GUARD = textwrap.dedent(
     """
-    import sys
     try:
         import resource
-        resource.setrlimit(resource.RLIMIT_CPU, (8, 8))
-        resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, 1024 * 1024 * 1024))
+        resource.setrlimit(resource.RLIMIT_CPU, (3, 3))
     except Exception:
         pass
     """
@@ -32,7 +31,6 @@ def extract_code(text: str) -> str:
     m = _CODE_BLOCK_RE.search(text)
     if m:
         return m.group(1).strip()
-    # Prefer corrected-code section if present.
     corrected = re.search(r"(?is)corrected code:\s*(.+)$", text)
     if corrected:
         body = corrected.group(1).strip()
@@ -65,7 +63,23 @@ def extract_function_name(prompt: str, code: str = "") -> str | None:
     return None
 
 
-def _run(script: str, timeout: float = 10.0) -> tuple[bool, str]:
+def _subprocess_env() -> dict[str, str]:
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "PYTHONHASHSEED": "0",
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+    }
+    # Windows local testing only.
+    if os.name == "nt":
+        for key in ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP"):
+            if key in os.environ:
+                env[key] = os.environ[key]
+    return env
+
+
+def _run(script: str, timeout: float = 4.0) -> tuple[bool, str]:
     path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -74,11 +88,11 @@ def _run(script: str, timeout: float = 10.0) -> tuple[bool, str]:
             f.write(_GUARD + "\n" + script)
             path = f.name
         proc = subprocess.run(
-            [sys.executable, path],
+            [sys.executable, "-I", path],
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0", "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")},
+            env=_subprocess_env(),
         )
         if proc.returncode == 0:
             return True, (proc.stdout or "").strip()
@@ -95,7 +109,7 @@ def _run(script: str, timeout: float = 10.0) -> tuple[bool, str]:
                 pass
 
 
-def run_program(code: str, timeout: float = 10.0) -> tuple[bool, str]:
+def run_program(code: str, timeout: float = 4.0) -> tuple[bool, str]:
     code = extract_code(code)
     if not code:
         return False, "NO_CODE"
@@ -113,21 +127,13 @@ def compile_ok(code: str) -> bool:
         return False
 
 
-def smoke_call(code: str, function_name: str | None, timeout: float = 8.0) -> bool:
-    """Confirm the function exists and can be called with no/trivial args without crash.
-
-    Does not prove correctness — only that code is loadable.
-    """
+def smoke_call(code: str, function_name: str | None, timeout: float = 3.0) -> bool:
+    """Confirm the function exists and is loadable."""
     code = extract_code(code)
     if not code or not compile_ok(code):
         return False
     if not function_name:
         return True
-    harness = (
-        code
-        + "\n"
-        + f"assert callable({function_name})\n"
-        + "print('OK')\n"
-    )
+    harness = code + "\n" + f"assert callable({function_name})\n" + "print('OK')\n"
     ok, out = _run(harness, timeout=timeout)
     return ok and out.endswith("OK")

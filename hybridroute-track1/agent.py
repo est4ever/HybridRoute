@@ -14,8 +14,8 @@ import json
 import os
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
 
 from openai import OpenAI
 
@@ -33,9 +33,21 @@ OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 FALLBACK_ANSWER = "Unable to complete this task due to an inference error."
 EMPTY_ANSWER = "No answer generated."
 
+# Harness boxes are often ~10 minutes. Keep a hard budget so we always write results.
+RUN_STARTED = time.monotonic()
+TIME_BUDGET_SEC = float(os.environ.get("TIME_BUDGET_SEC", "480"))
+
 REMOTE_CALLS = 0
 REMOTE_TOKENS = 0
 LOCAL_SOLVES = 0
+
+
+def time_left() -> float:
+    return TIME_BUDGET_SEC - (time.monotonic() - RUN_STARTED)
+
+
+def over_budget(reserve: float = 20.0) -> bool:
+    return time_left() <= reserve
 
 SYSTEM_PROMPTS = {
     "factual": (
@@ -88,14 +100,15 @@ LOGIC_POT_SYSTEM = (
 )
 
 MODEL_PREFERENCES = {
-    "code_generation": ["kimi-k2p7-code", "minimax-m3", "gemma-4-31b-it"],
-    "code_debugging": ["kimi-k2p7-code", "minimax-m3", "gemma-4-31b-it"],
-    "logic": ["minimax-m3", "kimi-k2p7-code", "gemma-4-31b-it"],
-    "math": ["minimax-m3", "kimi-k2p7-code", "gemma-4-31b-it"],
-    "factual": ["minimax-m3", "gemma-4-31b-it", "gemma-4-31b-it-nvfp4"],
-    "summarization": ["minimax-m3", "gemma-4-31b-it", "gemma-4-26b-a4b-it"],
-    "sentiment": ["minimax-m3", "gemma-4-26b-a4b-it", "gemma-4-31b-it"],
-    "ner": ["minimax-m3", "gemma-4-26b-a4b-it", "gemma-4-31b-it"],
+    # Prefer models that are actually served; avoid burning wall-clock on 404s.
+    "code_generation": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
+    "code_debugging": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
+    "logic": ["minimax-m3", "kimi-k2p7-code", "gemma-4-26b-a4b-it"],
+    "math": ["minimax-m3", "kimi-k2p7-code", "gemma-4-26b-a4b-it"],
+    "factual": ["minimax-m3", "gemma-4-26b-a4b-it", "gemma-4-31b-it-nvfp4"],
+    "summarization": ["minimax-m3", "gemma-4-26b-a4b-it", "gemma-4-31b-it-nvfp4"],
+    "sentiment": ["minimax-m3", "gemma-4-26b-a4b-it"],
+    "ner": ["minimax-m3", "gemma-4-26b-a4b-it"],
 }
 
 
@@ -269,35 +282,38 @@ def call_fireworks(
     max_tokens: int,
 ) -> str:
     global REMOTE_CALLS, REMOTE_TOKENS
+    if over_budget(25.0):
+        raise RuntimeError("time_budget_exceeded")
     api_model = resolve_api_model(model)
     last_error: Exception | None = None
-    for _ in range(2):
-        try:
-            response = client.chat.completions.create(
-                model=api_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0,
-            )
-            REMOTE_CALLS += 1
-            usage = getattr(response, "usage", None)
-            if usage is not None:
-                total = getattr(usage, "total_tokens", None)
-                if isinstance(total, int):
-                    REMOTE_TOKENS += total
-            message = response.choices[0].message
-            content = message.content
-            if content is None or not str(content).strip():
-                reasoning = getattr(message, "reasoning_content", None)
-                if isinstance(reasoning, str) and reasoning.strip():
-                    return reasoning
-                return ""
-            return content
-        except Exception as exc:  # noqa: BLE001
-            text = str(exc)
-            if "NOT_FOUND" in text or "Model not found" in text or "404" in text:
-                raise RuntimeError(f"model={api_model}: {exc}") from exc
-            last_error = exc
+    # Single attempt — retries burn harness wall clock and cause INFRA_ERROR.
+    try:
+        response = client.chat.completions.create(
+            model=api_model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0,
+            timeout=min(45.0, max(10.0, time_left() - 20.0)),
+        )
+        REMOTE_CALLS += 1
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            total = getattr(usage, "total_tokens", None)
+            if isinstance(total, int):
+                REMOTE_TOKENS += total
+        message = response.choices[0].message
+        content = message.content
+        if content is None or not str(content).strip():
+            reasoning = getattr(message, "reasoning_content", None)
+            if isinstance(reasoning, str) and reasoning.strip():
+                return reasoning
+            return ""
+        return content
+    except Exception as exc:  # noqa: BLE001
+        text = str(exc)
+        if "NOT_FOUND" in text or "Model not found" in text or "404" in text:
+            raise RuntimeError(f"model={api_model}: {exc}") from exc
+        last_error = exc
     raise RuntimeError(f"model={api_model}: {last_error}")
 
 
@@ -428,6 +444,9 @@ def process_task(
     prompt = task["prompt"]
     task_type = classify_task(prompt)
 
+    if over_budget(15.0):
+        return {"task_id": task["task_id"], "answer": FALLBACK_ANSWER}
+
     local_answer = try_local_solve(task_type, prompt)
     if local_answer and _looks_valid_answer(local_answer, task_type, prompt):
         LOCAL_SOLVES += 1
@@ -441,7 +460,8 @@ def process_task(
     if not candidates:
         candidates = list(allowed_models)
 
-    max_fallbacks = int(os.environ.get("MAX_MODEL_FALLBACKS", "4"))
+    # Keep fallbacks tiny — long failover chains time out the harness.
+    max_fallbacks = int(os.environ.get("MAX_MODEL_FALLBACKS", "2"))
     max_fallbacks = max(1, min(max_fallbacks, len(candidates)))
 
     answer = FALLBACK_ANSWER
@@ -452,10 +472,11 @@ def process_task(
         "false",
         "no",
     }:
-        pot = _solve_with_pot(client, task_type, prompt, candidates[:max_fallbacks], unavailable_models)
+        pot = _solve_with_pot(
+            client, task_type, prompt, candidates[:max_fallbacks], unavailable_models
+        )
         if pot:
-            answer = pot
-            return {"task_id": task["task_id"], "answer": answer}
+            return {"task_id": task["task_id"], "answer": pot}
 
     # Code tasks: require compile-ok code; retry across models.
     if task_type in {"code_generation", "code_debugging"}:
@@ -467,6 +488,8 @@ def process_task(
 
     max_tokens = max_tokens_for_task(task_type, prompt)
     for attempt, candidate in enumerate(candidates[:max_fallbacks], start=1):
+        if over_budget(20.0):
+            break
         try:
             system = SYSTEM_PROMPTS.get(task_type, SYSTEM_PROMPTS["factual"])
             if attempt > 1:
@@ -514,8 +537,10 @@ def _solve_with_pot(
     unavailable_models: set[str],
 ) -> str | None:
     system = MATH_POT_SYSTEM if task_type == "math" else LOGIC_POT_SYSTEM
-    outputs: list[str] = []
-    for candidate in candidates:
+    # One successful executable program is enough — self-consistency burns wall clock.
+    for candidate in candidates[:2]:
+        if over_budget(25.0):
+            return None
         try:
             raw = call_fireworks(
                 client,
@@ -524,35 +549,25 @@ def _solve_with_pot(
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=420,
+                max_tokens=320,
             )
-            ok, out = run_program(raw)
+            ok, out = run_program(raw, timeout=4.0)
             if ok and out and _pot_output_ok(out):
-                outputs.append(out.strip().splitlines()[-1].strip())
-                # Early accept if two agree or first looks clean for math.
-                if len(outputs) >= 2 and outputs[-1] == outputs[-2]:
-                    break
-                if task_type == "math" and re.fullmatch(r"-?\d+(?:\.\d+)?", outputs[-1]):
-                    # Keep going once more for agreement if more models remain.
-                    if len(outputs) >= 2:
-                        break
+                best = out.strip().splitlines()[-1].strip()
+                if task_type == "math":
+                    if "change" in prompt.lower() and re.fullmatch(
+                        r"-?\d+(?:\.\d+)?", best
+                    ):
+                        return f"Change: ${best}"
+                    return best
+                return best
         except Exception as exc:  # noqa: BLE001
             text = str(exc)
             if "NOT_FOUND" in text or "Model not found" in text:
                 unavailable_models.add(candidate)
                 unavailable_models.add(resolve_api_model(candidate))
             print(f"[pot:{task_type}] {exc}", file=sys.stderr)
-
-    if not outputs:
-        return None
-
-    # Majority vote on stdout answers.
-    best = max(set(outputs), key=outputs.count)
-    if task_type == "math":
-        if "change" in prompt.lower() and re.fullmatch(r"-?\d+(?:\.\d+)?", best):
-            return f"Change: ${best}"
-        return best
-    return best
+    return None
 
 
 def _pot_output_ok(out: str) -> bool:
@@ -576,8 +591,11 @@ def _solve_code(
     system = SYSTEM_PROMPTS[task_type]
     fn_name = extract_function_name(prompt)
     best: str | None = None
+    use_smoke = os.environ.get("ENABLE_CODE_SMOKE", "0") not in {"0", "false", "no"}
 
     for attempt, candidate in enumerate(candidates, start=1):
+        if over_budget(25.0):
+            break
         try:
             sys_msg = system
             if attempt > 1:
@@ -592,9 +610,15 @@ def _solve_code(
             if not code:
                 continue
             name = fn_name or extract_function_name(prompt, code)
-            if compile_ok(code) and (not name or smoke_call(code, name)):
+            ok = compile_ok(code)
+            if ok and use_smoke and name:
+                ok = smoke_call(code, name)
+            if ok and compile_ok(code):
                 if task_type == "code_debugging":
-                    return f"Bug: Fixed incorrect logic in the provided implementation.\n\nCorrected code:\n{code}"
+                    return (
+                        "Bug: Fixed incorrect logic in the provided implementation.\n\n"
+                        f"Corrected code:\n{code}"
+                    )
                 return code
             if compile_ok(code):
                 best = code
@@ -607,7 +631,10 @@ def _solve_code(
 
     if best:
         if task_type == "code_debugging":
-            return f"Bug: Fixed incorrect logic in the provided implementation.\n\nCorrected code:\n{best}"
+            return (
+                "Bug: Fixed incorrect logic in the provided implementation.\n\n"
+                f"Corrected code:\n{best}"
+            )
         return best
     return None
 
@@ -708,34 +735,62 @@ def write_results(results: list[dict[str, str]], path: str = OUTPUT_PATH) -> Non
 
 
 def main() -> int:
+    """
+    Always try to write /output/results.json with one entry per input task.
+    Exit 0 when a complete results file is written so the harness can score
+    instead of treating crashes/timeouts as INFRA_ERROR.
+    """
+    global RUN_STARTED
+    RUN_STARTED = time.monotonic()
     tasks: list[dict[str, str]] = []
+    results: list[dict[str, str]] = []
     try:
         api_key, base_url, allowed_models = load_env()
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=45.0)
         tasks = load_tasks()
+        # Seed full fallback sheet immediately so a kill still leaves scorable output
+        # if the harness snapshots the mount (best-effort).
+        results = [
+            {"task_id": t["task_id"], "answer": FALLBACK_ANSWER} for t in tasks
+        ]
+        write_results(results)
 
-        max_workers = int(os.environ.get("MAX_WORKERS", "2"))
-        max_workers = max(1, min(max_workers, 8))
+        # Sequential by default — safer under tight wall-clock limits.
+        max_workers = int(os.environ.get("MAX_WORKERS", "1"))
+        max_workers = max(1, min(max_workers, 4))
         unavailable_models: set[str] = set()
 
         if max_workers == 1 or len(tasks) <= 1:
-            results = [
-                process_task(task, client, allowed_models, unavailable_models)
-                for task in tasks
-            ]
+            for i, task in enumerate(tasks):
+                if over_budget(12.0):
+                    print(
+                        f"Time budget hit after {i}/{len(tasks)} tasks; writing partial results.",
+                        file=sys.stderr,
+                    )
+                    break
+                results[i] = process_task(
+                    task, client, allowed_models, unavailable_models
+                )
+                # Checkpoint after each task to survive mid-run kills.
+                if i % 1 == 0:
+                    write_results(results)
         else:
-            results_map: dict[str, dict[str, str]] = {}
+            results_map: dict[str, dict[str, str]] = {
+                t["task_id"]: {"task_id": t["task_id"], "answer": FALLBACK_ANSWER}
+                for t in tasks
+            }
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_task_id = {
+                future_to_idx = {
                     executor.submit(
                         process_task, task, client, allowed_models, unavailable_models
-                    ): task["task_id"]
-                    for task in tasks
+                    ): idx
+                    for idx, task in enumerate(tasks)
                 }
-                for future in as_completed(future_to_task_id):
-                    task_id = future_to_task_id[future]
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    task_id = tasks[idx]["task_id"]
                     try:
-                        result = future.result()
+                        result = future.result(timeout=max(5.0, time_left()))
                         results_map[result["task_id"]] = result
                     except Exception as exc:  # noqa: BLE001
                         print(f"[{task_id}] worker failed: {exc}", file=sys.stderr)
@@ -743,18 +798,13 @@ def main() -> int:
                             "task_id": task_id,
                             "answer": FALLBACK_ANSWER,
                         }
-            results = [
-                results_map.get(
-                    task["task_id"],
-                    {"task_id": task["task_id"], "answer": FALLBACK_ANSWER},
-                )
-                for task in tasks
-            ]
+                    results = [results_map[t["task_id"]] for t in tasks]
+                    write_results(results)
 
         write_results(results)
         print(
             f"Done. local_solves={LOCAL_SOLVES} remote_calls={REMOTE_CALLS} "
-            f"remote_tokens={REMOTE_TOKENS}",
+            f"remote_tokens={REMOTE_TOKENS} elapsed={time.monotonic()-RUN_STARTED:.1f}s",
             file=sys.stderr,
         )
         return 0
@@ -762,9 +812,12 @@ def main() -> int:
         print(f"Fatal error: {exc}", file=sys.stderr)
         try:
             if tasks:
-                write_results(
-                    [{"task_id": t["task_id"], "answer": FALLBACK_ANSWER} for t in tasks]
-                )
+                if not results:
+                    results = [
+                        {"task_id": t["task_id"], "answer": FALLBACK_ANSWER}
+                        for t in tasks
+                    ]
+                write_results(results)
             else:
                 write_results([])
         except Exception:

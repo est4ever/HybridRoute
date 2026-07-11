@@ -58,26 +58,28 @@ def over_budget(reserve: float = 20.0) -> bool:
 
 SYSTEM_PROMPTS = {
     "factual": (
-        "Answer the question accurately in 1-2 short sentences. "
-        "Include key facts and numbers when relevant. No preamble, no markdown."
+        "Answer accurately in 2-4 clear sentences. Cover every part of the question. "
+        "No preamble, no markdown."
     ),
     "math": (
-        "Solve the math problem. Put the final numeric answer on the FIRST line "
-        "(number only, or 'Change: $N' for change problems). Then show brief calculation."
+        "Solve carefully. Put the final answer number(s) on the FIRST line. "
+        "Then show brief calculation steps that prove the result."
     ),
     "sentiment": (
-        "Classify sentiment as exactly one of: Positive, Negative, Neutral, Mixed. "
-        "If the text has both praise and complaint, choose Mixed. "
-        "Output one line: <Label> - <short reason>."
+        "Classify as Positive, Negative, Neutral, or Mixed. "
+        "If the text has BOTH complaints and praise, choose Mixed (or Neutral/Positive), "
+        "never Negative alone, and the reason must mention BOTH sides. "
+        "Output one line: <Label> - <reason>."
     ),
     "summarization": (
-        "Summarize exactly as requested. Obey all length and format constraints "
-        "(e.g. one sentence, bullets). Output only the summary."
+        "Obey the format EXACTLY: if asked for N sentences, output exactly N sentences; "
+        "if asked for N bullet points with a word limit, output exactly N bullets and "
+        "respect the word limit. Cover all required themes. Output only the summary."
     ),
     "ner": (
         "Extract named entities. Return ONLY a JSON array like "
-        '[{"text":"...","type":"PERSON|ORG|LOCATION|DATE|MONEY|PRODUCT|EVENT|OTHER"}]. '
-        "No markdown fences, no prose."
+        '[{"text":"...","type":"PERSON|ORGANIZATION|LOCATION|DATE"}]. '
+        "Use ORGANIZATION (not ORG). No markdown fences, no prose."
     ),
     "code_debugging": (
         "Fix the bug. Return ONLY the corrected Python function in a ```python "
@@ -352,23 +354,25 @@ def clean_answer(answer: str, task_type: str) -> str:
         cleaned = _strip_ner_fences(cleaned)
         try:
             parsed = json.loads(cleaned)
-            cleaned = json.dumps(parsed, ensure_ascii=True)
+            cleaned = json.dumps(_normalize_ner_types(parsed), ensure_ascii=True)
         except json.JSONDecodeError:
             bracket_match = re.search(r"(\[[\s\S]*\]|\{[\s\S]*\})", cleaned)
             if bracket_match:
                 candidate = _strip_ner_fences(bracket_match.group(1).strip())
                 try:
                     parsed = json.loads(candidate)
-                    cleaned = json.dumps(parsed, ensure_ascii=True)
+                    cleaned = json.dumps(_normalize_ner_types(parsed), ensure_ascii=True)
                 except json.JSONDecodeError:
-                    # Line format "Name - Type" -> JSON
                     lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
                     entities = []
                     for ln in lines:
                         m = re.match(r"^(.+?)\s*[-–:]\s*([A-Za-z_]+)\s*$", ln)
                         if m:
+                            typ = m.group(2).strip().upper()
+                            if typ == "ORG":
+                                typ = "ORGANIZATION"
                             entities.append(
-                                {"text": m.group(1).strip(), "type": m.group(2).strip().upper()}
+                                {"text": m.group(1).strip(), "type": typ}
                             )
                     if entities:
                         cleaned = json.dumps(entities, ensure_ascii=True)
@@ -387,6 +391,23 @@ def _strip_ner_fences(text: str) -> str:
     text = re.sub(r"^\s*`{2,3}\s*(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*`{2,3}\s*$", "", text)
     return text.strip()
+
+
+def _normalize_ner_types(parsed):
+    if isinstance(parsed, list):
+        out = []
+        for item in parsed:
+            if isinstance(item, dict):
+                row = dict(item)
+                typ = str(row.get("type", "")).upper()
+                if typ == "ORG":
+                    typ = "ORGANIZATION"
+                row["type"] = typ
+                out.append(row)
+            else:
+                out.append(item)
+        return out
+    return parsed
 
 
 def _strip_decorative_markdown(text: str) -> str:
@@ -706,11 +727,34 @@ def _looks_valid_answer(answer: str, task_type: str, prompt: str) -> bool:
         except json.JSONDecodeError:
             return len(text) >= 3
 
-    if task_type == "summarization" and re.search(
-        r"exactly one sentence|in one sentence|in a single sentence", prompt_lower
-    ):
-        sentences = re.findall(r"[^.!?]+[.!?]", text)
-        return 1 <= len(sentences) <= 2 or ("." not in text and len(text.split()) >= 5)
+    if task_type == "summarization":
+        if re.search(r"exactly\s+two\s+sentences?", prompt_lower):
+            sentences = re.findall(r"[^.!?]+[.!?]", text)
+            return len(sentences) == 2
+        if re.search(r"exactly\s+three\s+sentences?", prompt_lower):
+            sentences = re.findall(r"[^.!?]+[.!?]", text)
+            return len(sentences) == 3
+        if re.search(r"(\d+)\s+bullet", prompt_lower):
+            bullets = [
+                ln for ln in text.splitlines() if re.match(r"^\s*[-*•]", ln.strip())
+            ]
+            m = re.search(r"(exactly\s+)?(\d+)\s+bullet", prompt_lower)
+            n = int(m.group(2)) if m else 3
+            if len(bullets) != n:
+                return False
+            limit_m = re.search(r"(?:no longer than|under|at most)\s+(\d+)\s+words?", prompt_lower)
+            if limit_m:
+                limit = int(limit_m.group(1))
+                for b in bullets:
+                    words = re.sub(r"^[-*•]\s*", "", b.strip()).split()
+                    if len(words) > limit:
+                        return False
+            return True
+        if re.search(
+            r"exactly one sentence|in one sentence|in a single sentence", prompt_lower
+        ):
+            sentences = re.findall(r"[^.!?]+[.!?]", text)
+            return 1 <= len(sentences) <= 2 or ("." not in text and len(text.split()) >= 5)
 
     if task_type == "math":
         return bool(re.search(r"\d", text))
@@ -795,8 +839,11 @@ def main() -> int:
         api_key, base_url, allowed_models = load_env()
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=45.0)
         tasks = load_tasks()
-        # Warm local GGUF during startup so first hard task does not stall.
-        if local_llm_available():
+        # Only warm GGUF when explicitly enabled AND present (disabled in default image).
+        if (
+            os.environ.get("ENABLE_LOCAL_LLM", "0") not in {"0", "false", "no"}
+            and local_llm_available()
+        ):
             try:
                 from local_llm import _get_llm
 

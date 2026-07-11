@@ -1,0 +1,33 @@
+[
+  {"task_id": "f1", "category": "factual", "prompt": "What is the chemical symbol for gold, and what is its atomic number?", "check": {"type": "contains_all", "values": ["Au", "79"]}},
+  {"task_id": "f2", "category": "factual", "prompt": "At sea level, what is the boiling point of water in degrees Celsius?", "check": {"type": "contains_all", "values": ["100"]}},
+  {"task_id": "f3", "category": "factual", "prompt": "Who wrote the play Romeo and Juliet?", "check": {"type": "contains_any", "values": ["Shakespeare"]}},
+  {"task_id": "f4", "category": "factual", "prompt": "What is the capital of Australia?", "check": {"type": "contains_any", "values": ["Canberra"]}},
+
+  {"task_id": "m1", "category": "math", "prompt": "A train travels 60 km in 45 minutes. What is its average speed in km/h?", "check": {"type": "numeric", "value": 80}},
+  {"task_id": "m2", "category": "math", "prompt": "A shirt costs $40. It is discounted by 25%, then a further 10% is taken off the reduced price. What is the final price in dollars?", "check": {"type": "numeric", "value": 27}},
+  {"task_id": "m3", "category": "math", "prompt": "What is 15% of 340?", "check": {"type": "numeric", "value": 51}},
+  {"task_id": "m4", "category": "math", "prompt": "A store sells notebooks for $4 each. If you buy 7 notebooks and pay with a $50 bill, how much change do you receive?", "check": {"type": "numeric", "value": 22}},
+
+  {"task_id": "s1", "category": "sentiment", "prompt": "Classify the sentiment: 'I waited an hour and the food arrived cold. Never coming back.'", "check": {"type": "contains_any", "values": ["negative"]}},
+  {"task_id": "s2", "category": "sentiment", "prompt": "Classify the sentiment: 'The concert was absolutely incredible, the best night of my life!'", "check": {"type": "contains_any", "values": ["positive"]}},
+  {"task_id": "s3", "category": "sentiment", "prompt": "Classify the sentiment as positive, negative, neutral, or mixed: I like the product quality, but delivery was late.", "check": {"type": "contains_any", "values": ["mixed"]}},
+
+  {"task_id": "sum1", "category": "summarization", "prompt": "Summarize in one sentence: The city council voted on Tuesday to approve a new bike-lane network spanning 30 miles, funded by a federal grant, with construction starting next spring.", "check": {"type": "contains_any", "values": ["bike", "lane", "council"]}},
+  {"task_id": "sum2", "category": "summarization", "prompt": "Summarise the following text in one sentence: AI agents can automate repetitive workflows by planning steps, calling tools, and validating outputs.", "check": {"type": "contains_any", "values": ["agent", "automat", "workflow", "tool"]}},
+
+  {"task_id": "n1", "category": "ner", "prompt": "Extract all named entities and their types: Tim Cook announced the new iPhone at Apple Park in Cupertino on September 12.", "check": {"type": "contains_all", "values": ["Tim Cook", "Apple", "Cupertino"]}},
+  {"task_id": "n2", "category": "ner", "prompt": "Extract named entities from this text and return JSON only: On 12 May 2024, Maria Lopez joined OpenAI in San Francisco.", "check": {"type": "contains_all", "values": ["Maria Lopez", "OpenAI", "San Francisco"]}},
+
+  {"task_id": "d1", "category": "code_debugging", "prompt": "This function should reverse a string but has a bug: def rev(s): return s. Find and fix it.", "check": {"type": "code_tests", "function_name": "rev", "tests": [{"args": ["abc"], "expected": "cba"}, {"args": [""], "expected": ""}]}},
+  {"task_id": "d2", "category": "code_debugging", "prompt": "This should return the average of a list but has a bug: def avg(x): return sum(x)*len(x). Find and fix it.", "check": {"type": "code_tests", "function_name": "avg", "tests": [{"args": [[2, 4, 6]], "expected": 4.0}, {"args": [[10]], "expected": 10.0}]}},
+  {"task_id": "d3", "category": "code_debugging", "prompt": "Debug this Python code and provide corrected code:\ndef add_items(items):\n    total = 0\n    for i in range(len(items) + 1):\n        total += items[i]\n    return total", "check": {"type": "code_tests", "function_name": "add_items", "tests": [{"args": [[1, 2, 3]], "expected": 6}, {"args": [[]], "expected": 0}]}},
+
+  {"task_id": "l1", "category": "logic", "prompt": "Anna, Ben, and Cara sit in a row of three seats. Anna is not in the middle. Cara is not on the right end. Ben is to the left of Cara. Who is in the middle seat?", "check": {"type": "contains_any", "values": ["Cara"]}},
+  {"task_id": "l2", "category": "logic", "prompt": "In a race, Maria finished ahead of Tom. Tom finished ahead of Sara. Sara finished ahead of Leo. Who finished last?", "check": {"type": "contains_any", "values": ["Leo"]}},
+  {"task_id": "l3", "category": "logic", "prompt": "Logic puzzle: Alice, Bob, and Carol sit left to right. Alice is not on the right. Bob is in the middle. Who sits on the left?", "check": {"type": "contains_any", "values": ["Alice"]}},
+
+  {"task_id": "g1", "category": "code_generation", "prompt": "Write a Python function is_palindrome(s) that returns True if s is a palindrome, ignoring case and spaces.", "check": {"type": "code_tests", "function_name": "is_palindrome", "tests": [{"args": ["Race car"], "expected": true}, {"args": ["hello"], "expected": false}]}},
+  {"task_id": "g2", "category": "code_generation", "prompt": "Write a Python function fizzbuzz(n) that returns 'Fizz' if n is divisible by 3, 'Buzz' if divisible by 5, 'FizzBuzz' if divisible by both, otherwise the number as a string.", "check": {"type": "code_tests", "function_name": "fizzbuzz", "tests": [{"args": [3], "expected": "Fizz"}, {"args": [5], "expected": "Buzz"}, {"args": [15], "expected": "FizzBuzz"}, {"args": [7], "expected": "7"}]}},
+  {"task_id": "g3", "category": "code_generation", "prompt": "Write a function called is_palindrome(s) that returns True if a string is a palindrome and False otherwise.", "check": {"type": "code_tests", "function_name": "is_palindrome", "tests": [{"args": ["aba"], "expected": true}, {"args": ["ab"], "expected": false}]}}
+]

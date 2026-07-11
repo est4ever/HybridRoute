@@ -41,14 +41,15 @@ SYSTEM_PROMPTS = {
 }
 
 MODEL_PREFERENCES = {
-    "code_generation": ["kimi-k2p7-code", "minimax-m3", "gemma-4-31b-it"],
-    "code_debugging": ["kimi-k2p7-code", "minimax-m3", "gemma-4-31b-it"],
+    # Prefer widely available hosted models first to avoid slow NOT_FOUND retries.
+    "code_generation": ["minimax-m3", "kimi-k2p7-code", "gemma-4-31b-it"],
+    "code_debugging": ["minimax-m3", "kimi-k2p7-code", "gemma-4-31b-it"],
     "logic": ["minimax-m3", "kimi-k2p7-code", "gemma-4-31b-it"],
     "math": ["minimax-m3", "kimi-k2p7-code", "gemma-4-31b-it"],
     "factual": ["minimax-m3", "gemma-4-31b-it", "gemma-4-31b-it-nvfp4"],
-    "summarization": ["gemma-4-31b-it-nvfp4", "gemma-4-26b-a4b-it", "minimax-m3"],
-    "sentiment": ["gemma-4-26b-a4b-it", "gemma-4-31b-it-nvfp4", "minimax-m3"],
-    "ner": ["gemma-4-26b-a4b-it", "gemma-4-31b-it-nvfp4", "minimax-m3"],
+    "summarization": ["minimax-m3", "gemma-4-31b-it", "gemma-4-26b-a4b-it"],
+    "sentiment": ["minimax-m3", "gemma-4-26b-a4b-it", "gemma-4-31b-it-nvfp4"],
+    "ner": ["minimax-m3", "gemma-4-26b-a4b-it", "gemma-4-31b-it-nvfp4"],
 }
 
 
@@ -275,12 +276,19 @@ def call_fireworks(
                 max_tokens=max_tokens,
                 temperature=0,
             )
-            content = response.choices[0].message.content
-            return content if content is not None else ""
+            message = response.choices[0].message
+            content = message.content
+            if content is None or not str(content).strip():
+                # Some models put text in reasoning_content with empty content.
+                reasoning = getattr(message, "reasoning_content", None)
+                if isinstance(reasoning, str) and reasoning.strip():
+                    return reasoning
+                return ""
+            return content
         except Exception as exc:  # noqa: BLE001
             # Model-not-found is not transient; move to next candidate immediately.
             text = str(exc)
-            if "NOT_FOUND" in text or "Model not found" in text:
+            if "NOT_FOUND" in text or "Model not found" in text or "404" in text:
                 raise RuntimeError(f"model={api_model}: {exc}")
             last_error = exc
     raise RuntimeError(f"model={api_model}: {last_error}")
@@ -400,13 +408,22 @@ def process_task(
     task: dict[str, str],
     client: OpenAI,
     allowed_models: list[str],
+    unavailable_models: set[str] | None = None,
 ) -> dict[str, str]:
+    if unavailable_models is None:
+        unavailable_models = set()
+
     task_type = classify_task(task["prompt"])
     model = choose_model(task_type, task["prompt"], allowed_models)
     candidates = ranked_models(task_type, allowed_models)
     if model in candidates:
         candidates.remove(model)
     candidates.insert(0, model)
+    # Skip models already known unavailable in this container run.
+    candidates = [c for c in candidates if c not in unavailable_models and resolve_api_model(c) not in unavailable_models]
+    if not candidates:
+        candidates = list(allowed_models)
+
     max_tokens = max_tokens_for_task(task_type, task["prompt"])
 
     answer = FALLBACK_ANSWER
@@ -428,6 +445,10 @@ def process_task(
                 break
             answer = cleaned
         except Exception as exc:
+            text = str(exc)
+            if "NOT_FOUND" in text or "Model not found" in text:
+                unavailable_models.add(candidate)
+                unavailable_models.add(resolve_api_model(candidate))
             print(f"[{task['task_id']}] {exc}", file=sys.stderr)
 
     if task_type == "sentiment" and (
@@ -435,6 +456,10 @@ def process_task(
         or "unable to infer sentiment" in answer.lower()
     ):
         answer = _sentiment_fallback(task["prompt"])
+
+    # Never return an empty answer object — harness expects task_id + answer.
+    if not str(answer).strip():
+        answer = FALLBACK_ANSWER if task_type != "sentiment" else _sentiment_fallback(task["prompt"])
 
     return {"task_id": task["task_id"], "answer": answer}
 
@@ -521,37 +546,70 @@ def write_results(results: list[dict[str, str]], path: str = OUTPUT_PATH) -> Non
 
 
 def main() -> int:
+    """
+    Always try to write /output/results.json with one entry per input task.
+    Exit 0 when a complete results file is written so the harness can score
+    instead of treating crashes/timeouts as INFRA_ERROR.
+    """
+    tasks: list[dict[str, str]] = []
     try:
         api_key, base_url, allowed_models = load_env()
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0)
         tasks = load_tasks()
 
-        max_workers = int(os.environ.get("MAX_WORKERS", "4"))
+        max_workers = int(os.environ.get("MAX_WORKERS", "2"))
         max_workers = max(1, min(max_workers, 8))
+        unavailable_models: set[str] = set()
 
         if max_workers == 1 or len(tasks) <= 1:
-            results = [process_task(task, client, allowed_models) for task in tasks]
+            results = [
+                process_task(task, client, allowed_models, unavailable_models)
+                for task in tasks
+            ]
         else:
             results_map: dict[str, dict[str, str]] = {}
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_task_id = {
-                    executor.submit(process_task, task, client, allowed_models): task["task_id"]
+                    executor.submit(
+                        process_task, task, client, allowed_models, unavailable_models
+                    ): task["task_id"]
                     for task in tasks
                 }
                 for future in as_completed(future_to_task_id):
-                    result = future.result()
-                    results_map[result["task_id"]] = result
-            results = [results_map[task["task_id"]] for task in tasks]
+                    task_id = future_to_task_id[future]
+                    try:
+                        result = future.result()
+                        results_map[result["task_id"]] = result
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[{task_id}] worker failed: {exc}", file=sys.stderr)
+                        results_map[task_id] = {
+                            "task_id": task_id,
+                            "answer": FALLBACK_ANSWER,
+                        }
+            results = [
+                results_map.get(
+                    task["task_id"],
+                    {"task_id": task["task_id"], "answer": FALLBACK_ANSWER},
+                )
+                for task in tasks
+            ]
 
         write_results(results)
         return 0
     except Exception as exc:
         print(f"Fatal error: {exc}", file=sys.stderr)
+        # Last resort: still emit valid schema so scoring can proceed.
         try:
-            write_results([])
+            if tasks:
+                write_results(
+                    [{"task_id": t["task_id"], "answer": FALLBACK_ANSWER} for t in tasks]
+                )
+            else:
+                # If input itself failed, write empty array only as absolute fallback.
+                write_results([])
         except Exception:
-            pass
-        return 1
+            return 1
+        return 0
 
 
 if __name__ == "__main__":

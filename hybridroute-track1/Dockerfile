@@ -7,15 +7,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py local_solvers.py code_exec.py local_llm.py .
 
-# Zero-token moonshot: deterministic solvers only (no Fireworks, no GGUF).
-# Top of leaderboard is 0 tokens + ~84%+ accuracy; hybrid spends tokens and loses rank.
+# Accuracy-first hybrid: verified local solvers at 0 tokens, Fireworks for the rest.
+# Moonshot (0-token only) scored 52.6% on the official set — do not default to it.
 ENV LOCAL_SOLVER_MODE=all \
     MAX_WORKERS=1 \
-    MAX_MODEL_FALLBACKS=1 \
-    ENABLE_POT=0 \
+    MAX_MODEL_FALLBACKS=3 \
+    ENABLE_POT=1 \
     ENABLE_LOCAL_LLM=0 \
     ENABLE_LOCAL_POT=0 \
-    MODE=moonshot \
+    MODE=hybrid \
     TIME_BUDGET_SEC=480 \
     PYTHONUNBUFFERED=1
 

@@ -1,10 +1,13 @@
-"""Track 1 batch agent — zero-token moonshot first.
+"""Track 1 batch agent — accuracy-first hybrid, then token-efficient.
 
 Strategy:
 1. Precise local classification (no model tokens).
-2. Deterministic local solvers + moonshot force-complete (0 Fireworks tokens).
-3. Optional local GGUF if explicitly enabled (off in default image — 4GB OOM risk).
-4. Hybrid MODE only: Fireworks PoT / code / NL fallback (costs tokens; loses rank vs 0-token leaders).
+2. High-confidence deterministic local solvers only (self-gating; never guess).
+3. Math/logic: program-of-thought via Fireworks + local Python execution.
+4. Code gen/debug: Fireworks code + compile/smoke verification; retries.
+5. Language tasks: Fireworks with tight format prompts + cleanup.
+Moonshot MODE exists for experiments but must not ship as default — official
+scoring showed forced zero-token guesses collapsing accuracy to ~52%.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from code_exec import (
     run_program,
     smoke_call,
 )
-from local_solvers import moonshot_complete, try_local_solve
+from local_solvers import try_local_solve
 from local_llm import (
     answer_with_local_llm,
     local_code_answer,
@@ -58,11 +61,13 @@ def over_budget(reserve: float = 20.0) -> bool:
 SYSTEM_PROMPTS = {
     "factual": (
         "Answer in English. Be concise and direct; no preamble. "
-        "Give a correct, clear answer in under 120 words covering every asked part."
+        "Give a correct, clear answer in under 120 words covering every asked part. "
+        "Prefer precise facts, names, numbers, and definitions the grader expects."
     ),
     "math": (
         "Answer in English. Work through brief calculation steps, then end with "
-        "'Answer: ' on its own line followed by the final number(s)."
+        "'Answer: ' on its own line followed by the final number(s). "
+        "Do not omit units if asked; double-check arithmetic."
     ),
     "sentiment": (
         "State the sentiment as Positive, Negative, Neutral, or Mixed, then one short reason. "
@@ -72,16 +77,16 @@ SYSTEM_PROMPTS = {
     "summarization": (
         "Output ONLY the summary. Obey length/format constraints EXACTLY "
         "(e.g. exactly N sentences, or exactly N bullets each under W words). "
-        "Cover every required theme."
+        "Cover every required theme from the passage (benefits AND challenges when both appear)."
     ),
     "ner": (
         "List each entity as 'TYPE: text', one per line, using only "
         "PERSON, ORGANIZATION, LOCATION, DATE. Use ORGANIZATION not ORG. "
-        "No JSON fences, no preamble."
+        "No JSON fences, no preamble. Extract ALL entities present."
     ),
     "code_debugging": (
         "State the bug in one sentence, then give the corrected code in a single "
-        "```python fenced block."
+        "```python fenced block. The corrected code must be complete and runnable."
     ),
     "logic": (
         "Reason in brief numbered steps checking each constraint, then end with "
@@ -89,7 +94,7 @@ SYSTEM_PROMPTS = {
     ),
     "code_generation": (
         "Output only the code in a single ```python fenced block — correct, "
-        "complete, and self-contained."
+        "complete, and self-contained. Match the requested function name exactly."
     ),
 }
 
@@ -635,28 +640,17 @@ def process_task(
                     LOCAL_LLM_SOLVES += 1
                     return {"task_id": task["task_id"], "answer": cleaned_local}
 
-    # Moonshot: never spend Fireworks tokens — required to compete with 0-token leaders.
+    # Moonshot: never spend Fireworks tokens. Only use verified locals / sentiment;
+    # do NOT ship force-guesses (they collapsed official accuracy to 52.6%).
     mode = os.environ.get("MODE", "hybrid").strip().lower()
     if mode in {"moonshot", "local_only", "zero"}:
-        answer = local_answer
-        if answer and task_type == "summarization" and not _looks_valid_answer(
-            answer, task_type, prompt
-        ):
-            answer = _repair_summarization(answer, prompt)
-        if answer and _looks_valid_answer(answer, task_type, prompt):
-            LOCAL_SOLVES += 1
-            return {"task_id": task["task_id"], "answer": answer}
+        if local_answer and _looks_valid_answer(local_answer, task_type, prompt):
+            return {"task_id": task["task_id"], "answer": local_answer}
         if task_type == "sentiment":
             return {"task_id": task["task_id"], "answer": _sentiment_fallback(prompt)}
-        forced = moonshot_complete(task_type, prompt)
-        if forced and _looks_valid_answer(forced, task_type, prompt):
-            LOCAL_SOLVES += 1
-            return {"task_id": task["task_id"], "answer": forced}
-        if forced and str(forced).strip():
-            return {"task_id": task["task_id"], "answer": forced}
         return {
             "task_id": task["task_id"],
-            "answer": answer or FALLBACK_ANSWER,
+            "answer": FALLBACK_ANSWER,
         }
 
     candidates = [
@@ -694,6 +688,21 @@ def process_task(
             return {"task_id": task["task_id"], "answer": code_ans}
 
     max_tokens = max_tokens_for_task(task_type, prompt)
+    user_content = prompt
+    if task_type in {"math", "logic"}:
+        user_content = (
+            f"{prompt}\n\nAfter your reasoning, put the final result on its own line as "
+            f"'Answer: <result>'."
+        )
+    elif task_type == "summarization":
+        user_content = (
+            f"{prompt}\n\nObey the requested format exactly and include the key themes."
+        )
+    elif task_type == "ner":
+        user_content = (
+            f"{prompt}\n\nReturn every PERSON, ORGANIZATION, LOCATION, and DATE entity."
+        )
+
     for attempt, candidate in enumerate(candidates[:max_fallbacks], start=1):
         if over_budget(20.0):
             break
@@ -707,7 +716,10 @@ def process_task(
             raw = call_fireworks(
                 client,
                 candidate,
-                [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content},
+                ],
                 max_tokens,
             )
             if not str(raw).strip():

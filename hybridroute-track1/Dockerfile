@@ -11,12 +11,12 @@ COPY agent.py local_solvers.py code_exec.py local_llm.py .
 # Deterministic solvers handle the proxy set at 0 tokens; Fireworks covers the rest.
 ENV LOCAL_SOLVER_MODE=all \
     MAX_WORKERS=1 \
-    MAX_MODEL_FALLBACKS=2 \
+    MAX_MODEL_FALLBACKS=3 \
     ENABLE_POT=1 \
     ENABLE_LOCAL_LLM=0 \
     ENABLE_LOCAL_POT=0 \
     MODE=hybrid \
-    TIME_BUDGET_SEC=420 \
+    TIME_BUDGET_SEC=480 \
     PYTHONUNBUFFERED=1
 
 CMD ["python", "agent.py"]

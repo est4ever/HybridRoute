@@ -7,8 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py local_solvers.py code_exec.py local_llm.py .
 
-# INFRA-safe hybrid: minimax-first (no Gemma stall), 2 fallbacks, seed-before-env.
-# Still no PoT / no GGUF. Token caps stay tight from prior cut.
+# INFRA-safe token cut on 2253/94.7%: keep minimax-first + 2 fallbacks + no PoT/GGUF.
+# Only trim caps/prompts and avoid needless second calls on soft tasks.
 ENV LOCAL_SOLVER_MODE=all \
     TRUST_LOCAL_NER=1 \
     MAX_WORKERS=1 \

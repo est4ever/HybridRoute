@@ -59,18 +59,18 @@ def time_left() -> float:
 def over_budget(reserve: float = 20.0) -> bool:
     return time_left() <= reserve
 
-# Ultra-short system prompts — input tokens are scored.
+# Short scored system prompts — keep CoT room on hard tasks only.
 _BASE = "English. Direct."
 
 SYSTEM_PROMPTS = {
-    "factual": f"{_BASE} ≤80 words; every asked part.",
-    "math": f"{_BASE} ≤3 short steps. Last line: Answer: <number(s)>",
-    "sentiment": f"{_BASE} Positive/Negative/Neutral/Mixed + 1 short reason. Both sides → Mixed.",
-    "summarization": f"{_BASE} Summary only; exact format. Include benefits AND challenges if both.",
-    "ner": f"{_BASE} One 'TYPE: text' line each. Types: PERSON, ORGANIZATION, LOCATION, DATE. All entities.",
-    "code_debugging": f"{_BASE} Bug in one sentence, then one ```python block.",
-    "logic": f"{_BASE} ≤4 short checks. Last line: Answer: <name>",
-    "code_generation": f"{_BASE} One ```python block; exact fn name; complete.",
+    "factual": f"{_BASE} ≤70 words; cover every asked part.",
+    "math": f"{_BASE} ≤2 short steps. Last line only: Answer: <number(s)>",
+    "sentiment": f"{_BASE} Label + 1 short reason. Both sides → Mixed.",
+    "summarization": f"{_BASE} Summary only; exact format. Benefits+challenges if both.",
+    "ner": f"{_BASE} 'TYPE: text' lines. PERSON/ORGANIZATION/LOCATION/DATE only. All entities.",
+    "code_debugging": f"{_BASE} One-line bug, then one ```python block.",
+    "logic": f"{_BASE} ≤3 short checks. Last line only: Answer: <name>",
+    "code_generation": f"{_BASE} One ```python block; exact fn name.",
 }
 
 MATH_POT_SYSTEM = (
@@ -234,25 +234,25 @@ def ranked_models(task_type: str, allowed_models: list[str]) -> list[str]:
 
 
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
-    # Aggressive completion caps — rank is token-first after the accuracy gate.
+    # Modest trim vs 2253/94.7% — do not starve math/logic CoT.
     text = prompt.lower()
     if task_type == "sentiment":
-        return 55
+        return 50
     if task_type == "summarization":
-        return 110 if "bullet" in text else 130
+        return 100 if "bullet" in text else 120
     if task_type == "ner":
-        return 130
+        return 120
     if task_type == "factual":
-        return 140
+        return 120
     if task_type == "math":
-        return 240
+        return 200
     if task_type == "logic":
-        return 260
+        return 220
     if task_type == "code_debugging":
-        return 300
+        return 280
     if task_type == "code_generation":
-        return 300
-    return 140
+        return 280
+    return 120
 
 
 def _ner_local_confident(answer: str) -> bool:
@@ -762,7 +762,8 @@ def _process_task_inner(
             return {"task_id": task["task_id"], "answer": code_ans}
 
     max_tokens = max_tokens_for_task(task_type, prompt)
-    # No extra user suffixes — they burn scored input tokens for little gain.
+    # Soft types: accept first non-empty (repair later) to avoid a second paid call.
+    soft_once = task_type in {"math", "logic", "factual", "sentiment"}
     for attempt, candidate in enumerate(candidates[:max_fallbacks], start=1):
         if over_budget(20.0):
             break
@@ -770,6 +771,7 @@ def _process_task_inner(
             system = SYSTEM_PROMPTS.get(task_type, SYSTEM_PROMPTS["factual"])
             if attempt > 1:
                 system += " Retry: valid format only."
+            call_cap = max_tokens if attempt == 1 else min(max_tokens, 160)
             raw = call_fireworks(
                 client,
                 candidate,
@@ -777,7 +779,7 @@ def _process_task_inner(
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens,
+                call_cap,
             )
             if not str(raw).strip():
                 continue
@@ -786,6 +788,8 @@ def _process_task_inner(
                 answer = cleaned
                 break
             answer = cleaned
+            if soft_once and str(cleaned).strip():
+                break
         except Exception as exc:  # noqa: BLE001
             text = str(exc)
             if "NOT_FOUND" in text or "Model not found" in text:

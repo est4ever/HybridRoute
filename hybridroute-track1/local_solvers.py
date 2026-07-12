@@ -750,11 +750,19 @@ def _solve_summarization(prompt: str) -> str | None:
             "- Firms invest in tools and rethink offices as hubs."
         )
 
-    # Novel constrained summaries → escalate (theme heuristics hurt official accuracy).
-    if re.search(r"exactly\s+(two|three)\s+sentences?", lower):
-        return None
-    if re.search(r"(exactly\s+)?\d+\s+bullet", lower):
-        return None
+    # Theme-aware constrained summaries (quality-gated in accept_local_answer).
+    two = re.search(r"exactly\s+two\s+sentences?", lower)
+    three = re.search(r"exactly\s+three\s+sentences?", lower)
+    bullets = re.search(r"(exactly\s+)?(\d+)\s+bullet", lower)
+    if two or three or bullets:
+        themed = _themed_summary(
+            passage,
+            prompt_lower=lower,
+            two=bool(two),
+            three=bool(three),
+            bullets=bullets,
+        )
+        return themed  # None → Fireworks; accept gate checks both sides
 
     one = re.search(r"\b(one|a single|exactly one)\s+sentence\b", lower)
     if one or "summar" in lower:
@@ -799,27 +807,31 @@ def _themed_summary(
     benefit = [s for s in sents if s not in challenge and _BENEFIT_RE.search(s)]
     if not benefit:
         benefit = [s for s in sents if s not in challenge]
+    # Require explicit challenge + benefit signals in source — else escalate.
     if not benefit or not challenge:
         return None
+    if not (_BENEFIT_RE.search(benefit[0]) or _BENEFIT_RE.search(" ".join(benefit))):
+        return None
 
-    def _as_sentence(parts: list[str], limit: int = 28) -> str:
+    def _as_sentence(parts: list[str], limit: int = 26) -> str:
         text = _clip_words(" ".join(parts), limit)
         if not text.endswith((".", "!", "?")):
             text += "."
         return text
 
+    out: str | None = None
     if two:
-        return f"{_as_sentence(benefit[:2])} {_as_sentence(challenge[:2])}"
-    if three:
+        out = f"{_as_sentence(benefit[:2])} {_as_sentence(challenge[:2])}"
+    elif three:
         mid = sents[len(sents) // 2]
-        return " ".join(
+        out = " ".join(
             [
-                _as_sentence(benefit[:1], 22),
-                _as_sentence([mid], 22),
-                _as_sentence(challenge[:1], 22),
+                _as_sentence(benefit[:1], 20),
+                _as_sentence([mid], 20),
+                _as_sentence(challenge[:1], 20),
             ]
         )
-    if bullets:
+    elif bullets:
         n = int(bullets.group(2))
         limit_m = re.search(
             r"(?:no longer than|under|at most)\s+(\d+)\s+words?", prompt_lower
@@ -842,8 +854,15 @@ def _themed_summary(
             points.append(
                 f"- {_clip_words(sents[min(len(points), len(sents) - 1)], limit)}"
             )
-        return "\n".join(points[:n])
-    return None
+        out = "\n".join(points[:n])
+
+    if not out:
+        return None
+    # Self-gate: refuse to return a one-sided summary.
+    al = out.lower()
+    if not (_BENEFIT_RE.search(al) and _CHALLENGE_RE.search(al)):
+        return None
+    return out
 
 
 def _solve_ner(prompt: str) -> str | None:

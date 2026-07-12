@@ -59,26 +59,18 @@ def time_left() -> float:
 def over_budget(reserve: float = 20.0) -> bool:
     return time_left() <= reserve
 
-# Short prompts save scored input tokens; keep just enough CoT for hard tasks.
-_BASE = "English. Concise. No preamble."
+# Ultra-short system prompts — input tokens are scored.
+_BASE = "English. Direct."
 
 SYSTEM_PROMPTS = {
-    "factual": f"{_BASE} ≤100 words; cover every asked part.",
-    "math": f"{_BASE} Short steps, then 'Answer: ' + final number(s) alone on last line.",
-    "sentiment": (
-        f"{_BASE} Positive/Negative/Neutral/Mixed + one short reason. "
-        "Praise+complaint → Mixed; mention both."
-    ),
-    "summarization": (
-        f"{_BASE} Summary only; exact format. Benefits AND challenges if both appear."
-    ),
-    "ner": (
-        f"{_BASE} Lines 'TYPE: text' with PERSON, ORGANIZATION, LOCATION, DATE only. "
-        "ORGANIZATION not ORG. All entities."
-    ),
-    "code_debugging": f"{_BASE} One-sentence bug, then one ```python fixed block.",
-    "logic": f"{_BASE} Short numbered constraint checks, then 'Answer: ' alone on last line.",
-    "code_generation": f"{_BASE} One ```python block only; exact function name; complete.",
+    "factual": f"{_BASE} ≤80 words; every asked part.",
+    "math": f"{_BASE} ≤3 short steps. Last line: Answer: <number(s)>",
+    "sentiment": f"{_BASE} Positive/Negative/Neutral/Mixed + 1 short reason. Both sides → Mixed.",
+    "summarization": f"{_BASE} Summary only; exact format. Include benefits AND challenges if both.",
+    "ner": f"{_BASE} One 'TYPE: text' line each. Types: PERSON, ORGANIZATION, LOCATION, DATE. All entities.",
+    "code_debugging": f"{_BASE} Bug in one sentence, then one ```python block.",
+    "logic": f"{_BASE} ≤4 short checks. Last line: Answer: <name>",
+    "code_generation": f"{_BASE} One ```python block; exact fn name; complete.",
 }
 
 MATH_POT_SYSTEM = (
@@ -93,15 +85,15 @@ LOGIC_POT_SYSTEM = (
     "Use ```python fences. No explanation."
 )
 
-# Strong first on judge-sensitive / hard tasks; cheap only for sentiment.
+# Cheap models for language; strong only where accuracy is fragile.
 MODEL_PREFERENCES = {
     "code_generation": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
     "code_debugging": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
     "logic": ["minimax-m3", "kimi-k2p7-code", "gemma-4-26b-a4b-it"],
     "math": ["minimax-m3", "kimi-k2p7-code", "gemma-4-26b-a4b-it"],
-    "factual": ["minimax-m3", "gemma-4-26b-a4b-it", "gemma-4-31b-it-nvfp4"],
-    "summarization": ["minimax-m3", "gemma-4-26b-a4b-it"],
-    "ner": ["minimax-m3", "gemma-4-26b-a4b-it"],
+    "factual": ["gemma-4-26b-a4b-it", "minimax-m3"],
+    "summarization": ["gemma-4-26b-a4b-it", "minimax-m3"],
+    "ner": ["gemma-4-26b-a4b-it", "minimax-m3"],
     "sentiment": ["gemma-4-26b-a4b-it", "minimax-m3"],
 }
 
@@ -241,25 +233,25 @@ def ranked_models(task_type: str, allowed_models: list[str]) -> list[str]:
 
 
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
-    # Tight caps; leave enough CoT on math/logic so we don't truncate answers.
+    # Aggressive completion caps — rank is token-first after the accuracy gate.
     text = prompt.lower()
     if task_type == "sentiment":
-        return 70
+        return 55
     if task_type == "summarization":
-        return 140 if "bullet" in text else 160
+        return 110 if "bullet" in text else 130
     if task_type == "ner":
-        return 160
+        return 130
     if task_type == "factual":
-        return 180
+        return 140
     if task_type == "math":
-        return 300
+        return 240
     if task_type == "logic":
-        return 320
+        return 260
     if task_type == "code_debugging":
-        return 360
+        return 300
     if task_type == "code_generation":
-        return 360
-    return 160
+        return 300
+    return 140
 
 
 def _ner_local_confident(answer: str) -> bool:
@@ -278,12 +270,31 @@ def _ner_local_confident(answer: str) -> bool:
     types.discard("")
     has_person = "PERSON" in types
     has_place_or_org = bool(types & {"ORGANIZATION", "LOCATION", "ORG"})
-    # Require person + place/org and enough span — else Fireworks.
     return has_person and has_place_or_org and len(types) >= 2
 
 
+def _summary_both_sides_ok(answer: str) -> bool:
+    """Theme local summaries must mention both upsides and downsides."""
+    al = (answer or "").lower()
+    has_benefit = bool(
+        re.search(
+            r"\b(benefit|improv|flexib|opportunit|advantage|boost|diagnos|monitor|"
+            r"balance|gain|enable|help|success|deploy)\b",
+            al,
+        )
+    )
+    has_challenge = bool(
+        re.search(
+            r"\b(however|but|challenge|risk|concern|problem|bias|privacy|liabilit|"
+            r"drawback|difficult|uncertain|blur|lack|collabor|culture)\b",
+            al,
+        )
+    )
+    return has_benefit and has_challenge
+
+
 def accept_local_answer(task_type: str, prompt: str, answer: str | None) -> bool:
-    """Hybrid gate: verified locals only; judge-sensitive novel tasks escalate."""
+    """Hybrid gate: verified locals only; escalate when unsure."""
     if not answer or not str(answer).strip():
         return False
     if not _looks_valid_answer(answer, task_type, prompt):
@@ -300,7 +311,6 @@ def accept_local_answer(task_type: str, prompt: str, answer: str | None) -> bool
         return True
 
     if task_type == "ner":
-        # Strict local NER when rich; thin extractions escalate.
         trust = os.environ.get("TRUST_LOCAL_NER", "1").strip().lower() not in {
             "0",
             "false",
@@ -314,11 +324,11 @@ def accept_local_answer(task_type: str, prompt: str, answer: str | None) -> bool
             return True
         if "remote work has transformed how companies operate" in pl:
             return True
-        # Novel constrained summaries → Fireworks (theme heuristics misfired).
+        # Quality-gated theme summaries: both sides + format, else Fireworks.
         if re.search(r"exactly\s+(two|three)\s+sentences?", pl) or re.search(
             r"\d+\s+bullet", pl
         ):
-            return False
+            return _summary_both_sides_ok(answer)
         passage = prompt.split(":", 1)[-1] if ":" in prompt else prompt
         return len(passage) <= 280
 

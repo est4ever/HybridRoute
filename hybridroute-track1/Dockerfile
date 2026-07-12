@@ -7,8 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py local_solvers.py code_exec.py local_llm.py .
 
-# Rank climb vs 2285/84.2%: escalate novel constrained summaries (accuracy),
-# keep strict local NER + no PoT + 1 fallback + short caps (tokens).
+# Token cut vs 2337/89.5%: cheaper language models, tighter caps, gated theme summaries.
+# Keep hybrid escalate for hard math/logic/code. Rank = tokens after ≥80% gate.
 ENV LOCAL_SOLVER_MODE=all \
     TRUST_LOCAL_NER=1 \
     MAX_WORKERS=1 \

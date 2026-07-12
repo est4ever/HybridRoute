@@ -199,7 +199,13 @@ def try_local_solve(task_type: str, prompt: str) -> str | None:
 
 
 def _solve_sentiment(prompt: str) -> str | None:
-    if not re.search(r"\bsentiment\b", prompt, re.I):
+    # Match classifier triggers (not only the word "sentiment").
+    if not re.search(
+        r"\bsentiment\b|positive,\s*negative|positive or negative|"
+        r"classify.*(review|feeling|emotion|tone)",
+        prompt,
+        re.I,
+    ):
         return None
     body = prompt.split(":", 1)[-1] if ":" in prompt else prompt
     body = body.strip().strip("'\"")
@@ -423,6 +429,50 @@ def _solve_math(prompt: str) -> str | None:
         if b != 0:
             return _fmt_num(c * b / a)
 
+    # Unit conversions (explicit both units + one number).
+    c_to_f = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:degrees?\s*)?(?:celsius|°c|c)\b.*?(?:fahrenheit|°f|f)\b",
+        text,
+    )
+    if c_to_f and ("convert" in text or "what is" in text or "to" in text):
+        c = float(c_to_f.group(1))
+        return _fmt_num(c * 9 / 5 + 32)
+    f_to_c = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:degrees?\s*)?(?:fahrenheit|°f|f)\b.*?(?:celsius|°c|c)\b",
+        text,
+    )
+    if f_to_c and ("convert" in text or "what is" in text or "to" in text):
+        f = float(f_to_c.group(1))
+        return _fmt_num((f - 32) * 5 / 9)
+    km_to_mi = re.search(
+        r"(\d+(?:\.\d+)?)\s*km\b.*?\b(miles?|mi)\b", text
+    )
+    if km_to_mi and ("convert" in text or "how many" in text or "equal" in text):
+        return _fmt_num(float(km_to_mi.group(1)) / 1.60934)
+    mi_to_km = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:miles?|mi)\b.*?\bkm\b", text
+    )
+    if mi_to_km and ("convert" in text or "how many" in text or "equal" in text):
+        return _fmt_num(float(mi_to_km.group(1)) * 1.60934)
+
+    # Unique linear ages: A is N years older than B; sum is S.
+    age = re.search(
+        r"(\d+)\s*years?\s*older.*?(?:sum|total).*?(\d+)|"
+        r"(?:sum|total).*?(\d+).*?(\d+)\s*years?\s*older",
+        text,
+        re.S,
+    )
+    if age and "age" in text:
+        older = float(age.group(1) or age.group(4))
+        total = float(age.group(2) or age.group(3))
+        younger = (total - older) / 2.0
+        older_age = younger + older
+        if "younger" in text or "youngest" in text:
+            return _fmt_num(younger)
+        if "older" in text or "oldest" in text:
+            return _fmt_num(older_age)
+        return _fmt_num(older_age)
+
     expr = re.search(
         r"(?<![\w])(\d+(?:\.\d+)?)\s*([\+\-\*/x×])\s*(\d+(?:\.\d+)?)(?![\w])",
         text,
@@ -521,6 +571,29 @@ def _solve_factual(prompt: str) -> str | None:
         "celsius" in text or "°c" in text or "c)" in text
     ):
         return "At sea level, water freezes at 0 degrees Celsius."
+    if "tcp" in text and "udp" in text:
+        return (
+            "TCP is connection-oriented and reliable with ordered delivery; "
+            "UDP is connectionless and faster but does not guarantee delivery."
+        )
+    if "http" in text and "https" in text and "difference" in text:
+        return (
+            "HTTPS is HTTP over TLS/SSL encryption, providing confidentiality and "
+            "integrity; plain HTTP is unencrypted."
+        )
+    if "stack" in text and "heap" in text and (
+        "difference" in text or "vs" in text or "versus" in text
+    ):
+        return (
+            "The stack stores function call frames and local variables with automatic "
+            "lifetime; the heap is dynamically allocated memory managed explicitly."
+        )
+    if re.search(r"\bhow many moons\b", text) and "earth" in text:
+        return "Earth has one natural moon."
+    if "smallest prime" in text:
+        return "The smallest prime number is 2."
+    if "pi" in text and re.search(r"\b(value of pi|approximate(?:ly)?\s+pi|what is pi)\b", text):
+        return "Pi is approximately 3.14159."
 
     m = re.search(r"capital of\s+([a-z\s\.]+)\??$", text)
     if not m:
@@ -598,6 +671,10 @@ def _solve_logic(prompt: str) -> str | None:
     seating = _solve_three_seat(prompt)
     if seating:
         return seating
+
+    seating4 = _solve_n_seat(prompt, n=4)
+    if seating4:
+        return seating4
 
     prize = _solve_prize_labels(prompt)
     if prize:
@@ -774,6 +851,73 @@ def _solve_three_seat(prompt: str) -> str | None:
     if "right" in q and "who" in q:
         return f"{order[2]} sits on the right."
     return f"Left to right: {order[0]}, {order[1]}, {order[2]}."
+
+
+def _solve_n_seat(prompt: str, n: int = 4) -> str | None:
+    """Unique-solution n-seat row puzzles (self-gates unless exactly one valid order)."""
+    if n > 5:
+        return None
+    names = re.findall(r"\b([A-Z][a-z]+)\b", prompt)
+    stop = {
+        "Who", "The", "Exactly", "Only", "Label", "Logic", "Puzzle", "In", "On",
+        "Left", "Right", "Middle", "Seat", "Seats", "Row", "End", "Between",
+    }
+    people: list[str] = []
+    for name in names:
+        if name in stop or name in people:
+            continue
+        people.append(name)
+        if len(people) == n:
+            break
+    if len(people) != n:
+        return None
+    if not re.search(r"\b(seat|row|left|right|middle|sits?)\b", prompt, re.I):
+        return None
+
+    constraints: list[Callable[[dict[str, int]], bool]] = []
+    mid = n // 2
+    for name in people:
+        if re.search(rf"\b{name}\b is not in the middle", prompt, re.I):
+            constraints.append(lambda pos, nm=name, m=mid: pos[nm] != m)
+        if re.search(rf"\b{name}\b is not on the (?:far )?right", prompt, re.I):
+            constraints.append(lambda pos, nm=name, last=n - 1: pos[nm] != last)
+        if re.search(rf"\b{name}\b is not on the (?:far )?left", prompt, re.I):
+            constraints.append(lambda pos, nm=name: pos[nm] != 0)
+        if re.search(rf"\b{name}\b is(?: sitting)? in the middle", prompt, re.I):
+            constraints.append(lambda pos, nm=name, m=mid: pos[nm] == m)
+        if re.search(rf"\b{name}\b is(?: sitting)? on the (?:far )?right", prompt, re.I):
+            constraints.append(lambda pos, nm=name, last=n - 1: pos[nm] == last)
+        if re.search(rf"\b{name}\b is(?: sitting)? on the (?:far )?left", prompt, re.I):
+            constraints.append(lambda pos, nm=name: pos[nm] == 0)
+
+    for a, b in itertools.permutations(people, 2):
+        if re.search(rf"\b{a}\b is to the left of \b{b}\b", prompt, re.I):
+            constraints.append(lambda pos, x=a, y=b: pos[x] < pos[y])
+        if re.search(rf"\b{a}\b is to the right of \b{b}\b", prompt, re.I):
+            constraints.append(lambda pos, x=a, y=b: pos[x] > pos[y])
+        if re.search(rf"\b{a}\b sits? between \b{b}\b", prompt, re.I):
+            # Need third person — skip ambiguous between with 2 names.
+            return None
+
+    if len(constraints) < n - 1:
+        return None
+
+    valid = []
+    for perm in itertools.permutations(people):
+        pos = {perm[i]: i for i in range(n)}
+        if all(c(pos) for c in constraints):
+            valid.append(perm)
+    if len(valid) != 1:
+        return None
+    order = valid[0]
+    q = prompt.lower()
+    if "middle" in q and "who" in q:
+        return f"{order[n // 2]} is in the middle seat."
+    if "left" in q and "who" in q:
+        return f"{order[0]} sits on the left."
+    if "right" in q and "who" in q:
+        return f"{order[-1]} sits on the right."
+    return "Left to right: " + ", ".join(order) + "."
 
 
 def _solve_prize_labels(prompt: str) -> str | None:
@@ -1161,6 +1305,46 @@ def _solve_code_generation(prompt: str) -> str | None:
             "    while b:\n"
             "        a, b = b, a % b\n"
             "    return abs(a)"
+        )
+
+    if re.search(r"\bis_anagram\b", text) or (
+        "anagram" in text and re.search(r"\b(function|def|write|implement)\b", text)
+    ):
+        return (
+            "def is_anagram(a, b):\n"
+            "    return sorted(a.replace(' ', '').lower()) == "
+            "sorted(b.replace(' ', '').lower())"
+        )
+
+    if re.search(r"\btwo_sum\b", text) or (
+        "two sum" in text and re.search(r"\b(function|def|write|implement)\b", text)
+    ):
+        return (
+            "def two_sum(nums, target):\n"
+            "    seen = {}\n"
+            "    for i, x in enumerate(nums):\n"
+            "        y = target - x\n"
+            "        if y in seen:\n"
+            "            return [seen[y], i]\n"
+            "        seen[x] = i\n"
+            "    return []"
+        )
+
+    if "binary search" in text and re.search(
+        r"\b(function|def|write|implement)\b", text
+    ):
+        return (
+            "def binary_search(arr, target):\n"
+            "    lo, hi = 0, len(arr) - 1\n"
+            "    while lo <= hi:\n"
+            "        mid = (lo + hi) // 2\n"
+            "        if arr[mid] == target:\n"
+            "            return mid\n"
+            "        if arr[mid] < target:\n"
+            "            lo = mid + 1\n"
+            "        else:\n"
+            "            hi = mid - 1\n"
+            "    return -1"
         )
 
     return None

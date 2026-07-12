@@ -59,16 +59,16 @@ def time_left() -> float:
 def over_budget(reserve: float = 20.0) -> bool:
     return time_left() <= reserve
 
-# Ultra-short system prompts — input tokens are scored.
+# Short scored prompts — keep CoT room on hard tasks.
 _BASE = "English. Direct."
 
 SYSTEM_PROMPTS = {
-    "factual": f"{_BASE} ≤80 words; every asked part.",
+    "factual": f"{_BASE} ≤70 words; every asked part.",
     "math": f"{_BASE} ≤3 short steps. Last line: Answer: <number(s)>",
     "sentiment": f"{_BASE} Positive/Negative/Neutral/Mixed + 1 short reason. Both sides → Mixed.",
-    "summarization": f"{_BASE} Summary only; exact format. Include benefits AND challenges if both.",
-    "ner": f"{_BASE} One 'TYPE: text' line each. Types: PERSON, ORGANIZATION, LOCATION, DATE. All entities.",
-    "code_debugging": f"{_BASE} Bug in one sentence, then one ```python block.",
+    "summarization": f"{_BASE} Summary only; exact format. Benefits AND challenges if both.",
+    "ner": f"{_BASE} 'TYPE: text' lines. PERSON/ORGANIZATION/LOCATION/DATE only. All entities.",
+    "code_debugging": f"{_BASE} One-line bug, then one ```python block.",
     "logic": f"{_BASE} ≤4 short checks. Last line: Answer: <name>",
     "code_generation": f"{_BASE} One ```python block; exact fn name; complete.",
 }
@@ -85,8 +85,7 @@ LOGIC_POT_SYSTEM = (
     "Use ```python fences. No explanation."
 )
 
-# Strong-first for remote (minimax) — Gemma-first caused 404/stall INFRA before.
-# Keep caps tight for tokens; fallbacks=2 so one 404 does not blank the run.
+# Strong-first everywhere (minimax) — Gemma-first caused INFRA stalls.
 MODEL_PREFERENCES = {
     "code_generation": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
     "code_debugging": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
@@ -95,7 +94,7 @@ MODEL_PREFERENCES = {
     "factual": ["minimax-m3", "gemma-4-26b-a4b-it"],
     "summarization": ["minimax-m3", "gemma-4-26b-a4b-it"],
     "ner": ["minimax-m3", "gemma-4-26b-a4b-it"],
-    "sentiment": ["gemma-4-26b-a4b-it", "minimax-m3"],
+    "sentiment": ["minimax-m3", "gemma-4-26b-a4b-it"],
 }
 
 
@@ -140,8 +139,13 @@ def classify_task(prompt: str) -> str:
     text = p.lower()
     has_digit = bool(re.search(r"\d", p))
 
-    if re.search(r"\b(bug|debug|fix|traceback|exception|incorrect|broken|fails?)\b", text) and (
-        "def " in p or "return" in text or "function" in text or "code" in text
+    # Code debug: require real code signals (avoid "incorrect function of the liver").
+    if re.search(r"\b(bug|debug|fix|traceback|exception|broken|fails?)\b", text) and (
+        "def " in p or "return" in text or "```" in p or re.search(r"\bcode\b", text)
+    ):
+        return "code_debugging"
+    if re.search(r"\bincorrect\b", text) and (
+        "def " in p or "return" in text or "```" in p
     ):
         return "code_debugging"
 
@@ -170,31 +174,47 @@ def classify_task(prompt: str) -> str:
     ):
         return "sentiment"
 
+    # Summarization: require summarize/tl;dr/condense/bullets — not bare "in one sentence".
     if re.search(
-        r"\b(summar(y|ise|ize)|tl;?dr|in (one|a single|exactly one|two|three) sentence|"
-        r"condense|bullet points?)\b",
+        r"\b(summar(y|ise|ize)|tl;?dr|condense|bullet points?)\b",
         text,
         re.I,
     ):
         return "summarization"
+    if re.search(r"\b(exactly\s+(two|three)\s+sentences?)\b", text) and len(p) > 200:
+        return "summarization"
 
+    # Logic: ownership/seating/race — NOT bare "who is" (that is factual).
     if re.search(
         r"\b(puzzle|deduce|logical(ly)?|constraint|sit(?:s|ting)? (?:in )?a row|"
-        r"who (?:owns|has|is|sits|finished)|to the (?:left|right) of|"
-        r"exactly one|cannot be|must be)\b",
+        r"who (?:owns|has|sits|finished)|to the (?:left|right) of|"
+        r"in the middle seat|finished ahead)\b",
         text,
         re.I,
     ):
         return "logic"
+    if re.search(r"\b(exactly one|cannot be|must be)\b", text) and re.search(
+        r"\b(seat|row|left|right|middle|owns?|pet|car|house)\b", text
+    ):
+        return "logic"
 
+    # Math: require arithmetic cues; bare "how many moons" stays factual.
     if re.search(
-        r"\b(calculate|compute|how many|how much|how far|how fast|how long|"
-        r"average speed|percent(?:age)?|remainder|sum of|product of|"
-        r"what is \d|word problem|change do you|simple interest|"
+        r"\b(calculate|compute|average speed|percent(?:age)?|remainder|"
+        r"sum of|product of|what is \d|word problem|change do you|simple interest|"
         r"final price|increas\w+ by|decreas\w+ by|discount)\b"
         r"|%\s*of|\d\s*%|\d\s*[-+*/x×]\s*\d",
         text,
         re.I,
+    ):
+        return "math"
+    if re.search(r"\b(how many|how much|how far|how fast|how long)\b", text) and (
+        has_digit
+        and re.search(
+            r"\b(km|miles?|mph|kg|dollars?|\$|cents?|minutes?|hours?|percent|"
+            r"%|buy|sell|cost|price|total|remain|left)\b",
+            text,
+        )
     ):
         return "math"
 
@@ -235,17 +255,16 @@ def ranked_models(task_type: str, allowed_models: list[str]) -> list[str]:
 
 
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
-    # Keep hard-task CoT room (math/logic/code) from scored 94.7% build.
-    # Only trim language completions slightly — safer than soft-once retries.
+    # Keep hard-task CoT room from 94.7% build; trim language only.
     text = prompt.lower()
     if task_type == "sentiment":
-        return 55
+        return 50
     if task_type == "summarization":
-        return 100 if "bullet" in text else 120
+        return 90 if "bullet" in text else 100
     if task_type == "ner":
-        return 120
+        return 100
     if task_type == "factual":
-        return 130
+        return 110
     if task_type == "math":
         return 240
     if task_type == "logic":
@@ -254,7 +273,7 @@ def max_tokens_for_task(task_type: str, prompt: str) -> int:
         return 300
     if task_type == "code_generation":
         return 300
-    return 140
+    return 120
 
 
 def _ner_local_confident(answer: str) -> bool:
@@ -327,13 +346,21 @@ def accept_local_answer(task_type: str, prompt: str, answer: str | None) -> bool
             return True
         if "remote work has transformed how companies operate" in pl:
             return True
-        # Quality-gated theme summaries: both sides + format, else Fireworks.
+        # Refuse echo/question-as-summary.
+        al = (answer or "").lower().strip()
+        if al.endswith("?") or al.startswith(("who ", "what ", "where ", "when ", "why ", "how ")):
+            return False
         if re.search(r"exactly\s+(two|three)\s+sentences?", pl) or re.search(
             r"\d+\s+bullet", pl
         ):
             return _summary_both_sides_ok(answer)
+        # One-liner locals only for short passages that look like content, not Qs.
         passage = prompt.split(":", 1)[-1] if ":" in prompt else prompt
-        return len(passage) <= 280
+        if len(passage) > 280:
+            return False
+        if not re.search(r"\b(summar|tl;?dr|condense)\b", pl):
+            return False
+        return len(passage.split()) >= 8
 
     return False
 
@@ -736,13 +763,13 @@ def _process_task_inner(
         candidates = list(allowed_models)
 
     # Keep fallbacks small but allow one extra for blank/format failures.
-    max_fallbacks = int(os.environ.get("MAX_MODEL_FALLBACKS", "3"))
+    max_fallbacks = int(os.environ.get("MAX_MODEL_FALLBACKS", "2"))
     max_fallbacks = max(1, min(max_fallbacks, len(candidates)))
 
     answer = FALLBACK_ANSWER
 
     # Program-of-thought for math/logic: execute model code locally.
-    if task_type in {"math", "logic"} and os.environ.get("ENABLE_POT", "1") not in {
+    if task_type in {"math", "logic"} and os.environ.get("ENABLE_POT", "0") not in {
         "0",
         "false",
         "no",

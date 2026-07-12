@@ -7,8 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py local_solvers.py code_exec.py local_llm.py .
 
-# Improve on 2253/94.7%: more local solvers + light language caps.
-# INFRA invariants unchanged: minimax-first, 2 fallbacks, seed-before-env, no PoT/GGUF.
+# FINAL push on 2253/94.7%: max local coverage + fixed routing + minimax-only.
+# INFRA invariants: 2 fallbacks, seed-before-env, no PoT/GGUF/soft-once/attestation.
 ENV LOCAL_SOLVER_MODE=all \
     TRUST_LOCAL_NER=1 \
     MAX_WORKERS=1 \

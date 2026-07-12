@@ -1,11 +1,10 @@
-"""Track 1 batch agent — accuracy-first, then token-efficient.
+"""Track 1 batch agent — zero-token moonshot first.
 
 Strategy:
 1. Precise local classification (no model tokens).
-2. Deterministic local solvers only when high-confidence.
-3. Math/logic: program-of-thought via Fireworks + local Python execution.
-4. Code gen/debug: Fireworks code + compile/smoke verification; retries.
-5. Language tasks: Fireworks with tight format prompts + cleanup.
+2. Deterministic local solvers + moonshot force-complete (0 Fireworks tokens).
+3. Optional local GGUF if explicitly enabled (off in default image — 4GB OOM risk).
+4. Hybrid MODE only: Fireworks PoT / code / NL fallback (costs tokens; loses rank vs 0-token leaders).
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ from code_exec import (
     run_program,
     smoke_call,
 )
-from local_solvers import try_local_solve
+from local_solvers import moonshot_complete, try_local_solve
 from local_llm import (
     answer_with_local_llm,
     local_code_answer,
@@ -636,14 +635,28 @@ def process_task(
                     LOCAL_LLM_SOLVES += 1
                     return {"task_id": task["task_id"], "answer": cleaned_local}
 
-    # Moonshot: never spend Fireworks tokens (accuracy risk; best token score if it passes).
+    # Moonshot: never spend Fireworks tokens — required to compete with 0-token leaders.
     mode = os.environ.get("MODE", "hybrid").strip().lower()
     if mode in {"moonshot", "local_only", "zero"}:
+        answer = local_answer
+        if answer and task_type == "summarization" and not _looks_valid_answer(
+            answer, task_type, prompt
+        ):
+            answer = _repair_summarization(answer, prompt)
+        if answer and _looks_valid_answer(answer, task_type, prompt):
+            LOCAL_SOLVES += 1
+            return {"task_id": task["task_id"], "answer": answer}
         if task_type == "sentiment":
             return {"task_id": task["task_id"], "answer": _sentiment_fallback(prompt)}
+        forced = moonshot_complete(task_type, prompt)
+        if forced and _looks_valid_answer(forced, task_type, prompt):
+            LOCAL_SOLVES += 1
+            return {"task_id": task["task_id"], "answer": forced}
+        if forced and str(forced).strip():
+            return {"task_id": task["task_id"], "answer": forced}
         return {
             "task_id": task["task_id"],
-            "answer": local_answer or FALLBACK_ANSWER,
+            "answer": answer or FALLBACK_ANSWER,
         }
 
     candidates = [

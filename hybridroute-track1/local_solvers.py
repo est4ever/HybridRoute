@@ -750,19 +750,11 @@ def _solve_summarization(prompt: str) -> str | None:
             "- Firms invest in tools and rethink offices as hubs."
         )
 
-    # Theme-aware constrained summaries (self-gating): both sides required or escalate.
-    two = re.search(r"exactly\s+two\s+sentences?", lower)
-    three = re.search(r"exactly\s+three\s+sentences?", lower)
-    bullets = re.search(r"(exactly\s+)?(\d+)\s+bullet", lower)
-    if two or three or bullets:
-        themed = _themed_summary(
-            passage,
-            prompt_lower=lower,
-            two=bool(two),
-            three=bool(three),
-            bullets=bullets,
-        )
-        return themed  # None → Fireworks
+    # Novel constrained summaries → escalate (theme heuristics hurt official accuracy).
+    if re.search(r"exactly\s+(two|three)\s+sentences?", lower):
+        return None
+    if re.search(r"(exactly\s+)?\d+\s+bullet", lower):
+        return None
 
     one = re.search(r"\b(one|a single|exactly one)\s+sentence\b", lower)
     if one or "summar" in lower:

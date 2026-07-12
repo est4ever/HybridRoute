@@ -8,4 +8,9 @@ node_modules
 dist
 build
 output
+_out
+_selfcheck_results.json
 sample/output
+models
+*.gguf
+%SystemDrive%

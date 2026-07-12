@@ -7,8 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py local_solvers.py code_exec.py local_llm.py .
 
-# INFRA-safe token cut on 2253/94.7%: keep minimax-first + 2 fallbacks + no PoT/GGUF.
-# Only trim caps/prompts and avoid needless second calls on soft tasks.
+# RESTORED scored build (bfe2882): 2253 tokens / 94.7% — do not regress INFRA guards.
+# minimax-first, 2 fallbacks, seed-before-env, no PoT, no GGUF, single-manifest push only.
 ENV LOCAL_SOLVER_MODE=all \
     TRUST_LOCAL_NER=1 \
     MAX_WORKERS=1 \

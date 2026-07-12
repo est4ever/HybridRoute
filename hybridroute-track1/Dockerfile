@@ -7,8 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py local_solvers.py code_exec.py local_llm.py .
 
-# Gate is cleared at 84.2%; ranking is now token golf.
-# Prefer verified locals; one Fireworks CoT call when needed (no expensive PoT double-spend).
+# True hybrid router: high-confidence local first, Fireworks when accuracy needs it.
+# Not all-local. No PoT double-spend; one strong/cheap CoT call on escalate.
 ENV LOCAL_SOLVER_MODE=all \
     TRUST_LOCAL_NER=1 \
     MAX_WORKERS=1 \

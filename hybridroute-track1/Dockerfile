@@ -7,10 +7,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py local_solvers.py code_exec.py local_llm.py .
 
-# True hybrid router: high-confidence local first, Fireworks when accuracy needs it.
-# Not all-local. No PoT double-spend; one strong/cheap CoT call on escalate.
+# Pass-safe hybrid (hold ≥84.2%) + token cut vs the 3.5k run:
+# - Same as known pass: NER via Fireworks (TRUST_LOCAL_NER=0)
+# - Biggest token save: ENABLE_POT=0 (one CoT call, not PoT+retry)
+# - Still local for verified sentiment/math/logic/code/facts only
 ENV LOCAL_SOLVER_MODE=all \
-    TRUST_LOCAL_NER=1 \
+    TRUST_LOCAL_NER=0 \
     MAX_WORKERS=1 \
     MAX_MODEL_FALLBACKS=2 \
     ENABLE_POT=0 \

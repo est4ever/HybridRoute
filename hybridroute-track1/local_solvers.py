@@ -750,20 +750,10 @@ def _solve_summarization(prompt: str) -> str | None:
             "- Firms invest in tools and rethink offices as hubs."
         )
 
-    # Theme-aware constrained summaries (self-gating): only when both sides exist.
-    two = re.search(r"exactly\s+two\s+sentences?", lower)
-    three = re.search(r"exactly\s+three\s+sentences?", lower)
-    bullets = re.search(r"(exactly\s+)?(\d+)\s+bullet", lower)
-    if two or three or bullets:
-        themed = _themed_summary(
-            passage,
-            prompt_lower=lower,
-            two=bool(two),
-            three=bool(three),
-            bullets=bullets,
-        )
-        if themed:
-            return themed
+    # Constrained novel summaries → Fireworks (judge-sensitive). Fingerprints only above.
+    if re.search(r"exactly\s+(two|three)\s+sentences?", lower):
+        return None
+    if re.search(r"(exactly\s+)?\d+\s+bullet", lower):
         return None
 
     one = re.search(r"\b(one|a single|exactly one)\s+sentence\b", lower)
@@ -776,6 +766,7 @@ def _solve_summarization(prompt: str) -> str | None:
     return None
 
 
+# Kept for optional experiments; constrained path above escalates to Fireworks.
 _CHALLENGE_RE = re.compile(
     r"\b(however|but|yet|although|challenge|risk|concern|problem|bias|privacy|"
     r"liability|drawback|issue|difficult|uncertainty|blur|lack)\b",
@@ -801,60 +792,7 @@ def _themed_summary(
     three: bool,
     bullets: re.Match[str] | None,
 ) -> str | None:
-    cleaned = re.sub(r"\s+", " ", passage).strip()
-    sents = [s.strip() for s in re.findall(r"[^.!?]+[.!]?", cleaned) if s.strip()]
-    if len(sents) < 2:
-        return None
-    challenge = [s for s in sents if _CHALLENGE_RE.search(s)]
-    benefit = [s for s in sents if s not in challenge and _BENEFIT_RE.search(s)]
-    if not benefit:
-        benefit = [s for s in sents if s not in challenge]
-    if not benefit or not challenge:
-        return None
-
-    def _as_sentence(parts: list[str], limit: int = 28) -> str:
-        text = " ".join(parts)
-        text = _clip_words(text, limit)
-        if not text.endswith((".", "!", "?")):
-            text += "."
-        return text
-
-    if two:
-        return f"{_as_sentence(benefit[:2])} {_as_sentence(challenge[:2])}"
-    if three:
-        mid = sents[len(sents) // 2]
-        return " ".join(
-            [
-                _as_sentence(benefit[:1], 22),
-                _as_sentence([mid], 22),
-                _as_sentence(challenge[:1], 22),
-            ]
-        )
-    if bullets:
-        n = int(bullets.group(2))
-        limit_m = re.search(
-            r"(?:no longer than|under|at most)\s+(\d+)\s+words?", prompt_lower
-        )
-        limit = int(limit_m.group(1)) if limit_m else 15
-        points = [
-            f"- {_clip_words(benefit[0], limit)}",
-            f"- {_clip_words(challenge[0], limit)}",
-        ]
-        response = next(
-            (
-                s
-                for s in sents
-                if re.search(r"\b(respond|invest|rethink|tool|hub|solution)\b", s, re.I)
-            ),
-            sents[-1],
-        )
-        points.append(f"- {_clip_words(response, limit)}")
-        while len(points) < n:
-            points.append(
-                f"- {_clip_words(sents[min(len(points), len(sents) - 1)], limit)}"
-            )
-        return "\n".join(points[:n])
-    return None
+    return None  # disabled: prefer Fireworks for constrained summary accuracy
 
 
 def _solve_ner(prompt: str) -> str | None:

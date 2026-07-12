@@ -257,27 +257,45 @@ def ranked_models(task_type: str, allowed_models: list[str]) -> list[str]:
 
 
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
-    # Caps aligned to TokenRouter v3 (16/19). Do not starve math/logic CoT.
+    # Tight caps to cut completion tokens; keep enough for math/logic CoT.
     text = prompt.lower()
     if task_type == "sentiment":
-        return 120
+        return 80
     if task_type == "summarization":
-        if "bullet" in text or "detailed" in text or "paragraph" in text:
-            return 260
-        return 240
+        if "bullet" in text:
+            return 160
+        return 180
     if task_type == "ner":
-        return 260
+        return 180
     if task_type == "factual":
-        return 320
+        return 200
     if task_type == "math":
-        return 400
+        return 280
     if task_type == "logic":
-        return 460
+        return 300
     if task_type == "code_debugging":
-        return 520
+        return 360
     if task_type == "code_generation":
-        return 520
-    return 240
+        return 360
+    return 160
+
+
+def _ner_local_confident(answer: str) -> bool:
+    """Accept local NER only when it looks complete enough to risk skipping Fireworks."""
+    try:
+        parsed = json.loads(answer)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(parsed, list) or len(parsed) < 2:
+        return False
+    types = {
+        str(item.get("type", "")).upper()
+        for item in parsed
+        if isinstance(item, dict)
+    }
+    types.discard("")
+    # Need at least two entity types (e.g. PERSON+ORG or DATE+LOCATION).
+    return len(types) >= 2
 
 
 def resolve_api_model(model: str) -> str:
@@ -605,17 +623,17 @@ def process_task(
     if over_budget(15.0):
         return {"task_id": task["task_id"], "answer": FALLBACK_ANSWER}
 
-    # NER: prefer Fireworks (cheap tier) — partial local extractions look valid but
-    # miss entities and fail the judge. Opt in with TRUST_LOCAL_NER=1.
-    trust_local_ner = os.environ.get("TRUST_LOCAL_NER", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "all",
+    # NER: local only when rich enough; TRUST_LOCAL_NER=0 forces Fireworks.
+    trust_local_ner = os.environ.get("TRUST_LOCAL_NER", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
     }
     local_answer = None
     if task_type != "ner" or trust_local_ner:
         local_answer = try_local_solve(task_type, prompt)
+    if task_type == "ner" and local_answer and not _ner_local_confident(local_answer):
+        local_answer = None
     if local_answer and _looks_valid_answer(local_answer, task_type, prompt):
         LOCAL_SOLVES += 1
         return {"task_id": task["task_id"], "answer": local_answer}
@@ -695,21 +713,7 @@ def process_task(
             return {"task_id": task["task_id"], "answer": code_ans}
 
     max_tokens = max_tokens_for_task(task_type, prompt)
-    user_content = prompt
-    if task_type in {"math", "logic"}:
-        user_content = (
-            f"{prompt}\n\nAfter reasoning, end with a line: Answer: <final result>"
-        )
-    elif task_type == "summarization":
-        user_content = (
-            f"{prompt}\n\nFollow the format exactly. If the passage has both upsides "
-            f"and downsides, the summary must mention both."
-        )
-    elif task_type == "ner":
-        user_content = (
-            f"{prompt}\n\nInclude every PERSON, ORGANIZATION, LOCATION, and DATE."
-        )
-
+    # No extra user suffixes — they burn scored input tokens for little gain.
     for attempt, candidate in enumerate(candidates[:max_fallbacks], start=1):
         if over_budget(20.0):
             break
@@ -725,7 +729,7 @@ def process_task(
                 candidate,
                 [
                     {"role": "system", "content": system},
-                    {"role": "user", "content": user_content},
+                    {"role": "user", "content": prompt},
                 ],
                 max_tokens,
             )
@@ -776,7 +780,7 @@ def _solve_with_pot(
 ) -> str | None:
     system = MATH_POT_SYSTEM if task_type == "math" else LOGIC_POT_SYSTEM
     outputs: list[str] = []
-    for candidate in candidates[:2]:
+    for candidate in candidates[:1]:  # one PoT attempt — retries burn scored tokens
         if over_budget(25.0):
             break
         try:
@@ -787,7 +791,7 @@ def _solve_with_pot(
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=320,
+                max_tokens=240,
             )
             ok, out = run_program(raw, timeout=4.0)
             if ok and out and _pot_output_ok(out):

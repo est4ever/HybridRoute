@@ -7,8 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py local_solvers.py code_exec.py local_llm.py .
 
-# RESTORED scored build (bfe2882): 2253 tokens / 94.7% — do not regress INFRA guards.
-# minimax-first, 2 fallbacks, seed-before-env, no PoT, no GGUF, single-manifest push only.
+# Improve on 2253/94.7%: more local solvers + light language caps.
+# INFRA invariants unchanged: minimax-first, 2 fallbacks, seed-before-env, no PoT/GGUF.
 ENV LOCAL_SOLVER_MODE=all \
     TRUST_LOCAL_NER=1 \
     MAX_WORKERS=1 \

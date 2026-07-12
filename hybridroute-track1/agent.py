@@ -190,8 +190,9 @@ def classify_task(prompt: str) -> str:
     if re.search(
         r"\b(calculate|compute|how many|how much|how far|how fast|how long|"
         r"average speed|percent(?:age)?|remainder|sum of|product of|"
-        r"what is \d|word problem|change do you)\b"
-        r"|%\s*of|\d\s*[-+*/x×]\s*\d",
+        r"what is \d|word problem|change do you|simple interest|"
+        r"final price|increas\w+ by|decreas\w+ by|discount)\b"
+        r"|%\s*of|\d\s*%|\d\s*[-+*/x×]\s*\d",
         text,
         re.I,
     ):
@@ -199,7 +200,7 @@ def classify_task(prompt: str) -> str:
 
     if has_digit and re.search(
         r"\b(km|miles?|mph|kg|dollars?|\$|cents?|minutes?|hours?|percent|items?|"
-        r"notebooks?|bill)\b",
+        r"notebooks?|bill|price|principal|interest)\b",
         text,
         re.I,
     ):
@@ -234,16 +235,17 @@ def ranked_models(task_type: str, allowed_models: list[str]) -> list[str]:
 
 
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
-    # Aggressive completion caps — rank is token-first after the accuracy gate.
+    # Keep hard-task CoT room (math/logic/code) from scored 94.7% build.
+    # Only trim language completions slightly — safer than soft-once retries.
     text = prompt.lower()
     if task_type == "sentiment":
         return 55
     if task_type == "summarization":
-        return 110 if "bullet" in text else 130
+        return 100 if "bullet" in text else 120
     if task_type == "ner":
-        return 130
+        return 120
     if task_type == "factual":
-        return 140
+        return 130
     if task_type == "math":
         return 240
     if task_type == "logic":

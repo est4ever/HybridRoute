@@ -85,15 +85,16 @@ LOGIC_POT_SYSTEM = (
     "Use ```python fences. No explanation."
 )
 
-# Cheap models for language; strong only where accuracy is fragile.
+# Strong-first for remote (minimax) — Gemma-first caused 404/stall INFRA before.
+# Keep caps tight for tokens; fallbacks=2 so one 404 does not blank the run.
 MODEL_PREFERENCES = {
     "code_generation": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
     "code_debugging": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
     "logic": ["minimax-m3", "kimi-k2p7-code", "gemma-4-26b-a4b-it"],
     "math": ["minimax-m3", "kimi-k2p7-code", "gemma-4-26b-a4b-it"],
-    "factual": ["gemma-4-26b-a4b-it", "minimax-m3"],
-    "summarization": ["gemma-4-26b-a4b-it", "minimax-m3"],
-    "ner": ["gemma-4-26b-a4b-it", "minimax-m3"],
+    "factual": ["minimax-m3", "gemma-4-26b-a4b-it"],
+    "summarization": ["minimax-m3", "gemma-4-26b-a4b-it"],
+    "ner": ["minimax-m3", "gemma-4-26b-a4b-it"],
     "sentiment": ["gemma-4-26b-a4b-it", "minimax-m3"],
 }
 
@@ -351,7 +352,8 @@ def call_fireworks(
     if over_budget(25.0):
         raise RuntimeError("time_budget_exceeded")
     api_model = resolve_api_model(model)
-    timeout = min(45.0, max(10.0, time_left() - 20.0))
+    # Fail fast on bad/undeployed models so the run still finishes under harness limits.
+    timeout = min(30.0, max(8.0, time_left() - 25.0))
     last_error: Exception | None = None
 
     # reasoning_effort=none: hide scored thinking tokens; some models reject it.
@@ -645,6 +647,23 @@ def _normalize_sentiment(text: str) -> str:
 
 
 def process_task(
+    task: dict[str, str],
+    client: OpenAI,
+    allowed_models: list[str],
+    unavailable_models: set[str] | None = None,
+) -> dict[str, str]:
+    """Never raise — a single task failure must not become INFRA_ERROR."""
+    try:
+        return _process_task_inner(task, client, allowed_models, unavailable_models)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{task.get('task_id', '?')}] process_task failed: {exc}", file=sys.stderr)
+        return {
+            "task_id": str(task.get("task_id", "?")),
+            "answer": FALLBACK_ANSWER,
+        }
+
+
+def _process_task_inner(
     task: dict[str, str],
     client: OpenAI,
     allowed_models: list[str],
@@ -1029,9 +1048,15 @@ def main() -> int:
     tasks: list[dict[str, str]] = []
     results: list[dict[str, str]] = []
     try:
-        api_key, base_url, allowed_models = load_env()
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=45.0)
+        # Seed BEFORE any Fireworks/env work so a later crash still leaves scorable JSON.
         tasks = load_tasks()
+        results = [
+            {"task_id": t["task_id"], "answer": FALLBACK_ANSWER} for t in tasks
+        ]
+        write_results(results)
+
+        api_key, base_url, allowed_models = load_env()
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=35.0)
         # Only warm GGUF when explicitly enabled AND present (disabled in default image).
         if (
             os.environ.get("ENABLE_LOCAL_LLM", "0") not in {"0", "false", "no"}
@@ -1044,12 +1069,6 @@ def main() -> int:
                 print("[local_llm] warmed", file=sys.stderr)
             except Exception as exc:  # noqa: BLE001
                 print(f"[local_llm] warm failed: {exc}", file=sys.stderr)
-        # Seed full fallback sheet immediately so a kill still leaves scorable output
-        # if the harness snapshots the mount (best-effort).
-        results = [
-            {"task_id": t["task_id"], "answer": FALLBACK_ANSWER} for t in tasks
-        ]
-        write_results(results)
 
         # Sequential by default — safer under tight wall-clock limits.
         max_workers = int(os.environ.get("MAX_WORKERS", "1"))
@@ -1068,8 +1087,7 @@ def main() -> int:
                     task, client, allowed_models, unavailable_models
                 )
                 # Checkpoint after each task to survive mid-run kills.
-                if i % 1 == 0:
-                    write_results(results)
+                write_results(results)
         else:
             results_map: dict[str, dict[str, str]] = {
                 t["task_id"]: {"task_id": t["task_id"], "answer": FALLBACK_ANSWER}

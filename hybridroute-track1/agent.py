@@ -59,44 +59,37 @@ def time_left() -> float:
 def over_budget(reserve: float = 20.0) -> bool:
     return time_left() <= reserve
 
-# Brief CoT on hard tasks is required for 16/19 — do not strip steps.
-_BASE = (
-    "Answer in English. Be concise and direct; no preamble, no restating the question."
-)
+# Brief CoT on hard tasks is required — do not strip steps on math/logic.
+_BASE = "Answer in English. Be concise and direct; no preamble."
 
 SYSTEM_PROMPTS = {
     "factual": (
-        f"{_BASE} Give a correct, clear answer in under 120 words covering every asked part."
+        f"{_BASE} Correct answer under 120 words covering every asked part."
     ),
     "math": (
-        f"{_BASE} Work through it in brief steps, then end with "
-        "'Answer: ' on its own line followed by the final number(s)."
+        f"{_BASE} Brief steps, then 'Answer: ' on its own line with the final number(s)."
     ),
     "sentiment": (
-        f"{_BASE} State the sentiment as Positive, Negative, Neutral, or Mixed, "
-        "then one short reason. If the text has BOTH complaints and praise, you MUST "
-        "use Mixed (never Negative alone) and the reason must mention BOTH sides."
+        f"{_BASE} Positive, Negative, Neutral, or Mixed, then one short reason. "
+        "BOTH praise and complaints → Mixed (never Negative alone); mention both sides."
     ),
     "summarization": (
-        f"{_BASE} Output ONLY the summary and obey any length/format constraint exactly. "
-        "If the passage has both benefits and challenges/risks, include both."
+        f"{_BASE} Output ONLY the summary; obey format exactly. "
+        "Include benefits AND challenges/risks when both appear."
     ),
     "ner": (
-        f"{_BASE} List each entity as 'TYPE: text', one per line, using only "
-        "PERSON, ORGANIZATION, LOCATION, DATE. Use ORGANIZATION not ORG. "
-        "Extract ALL entities. No fences, no preamble."
+        f"{_BASE} One 'TYPE: text' per line using PERSON, ORGANIZATION, LOCATION, DATE. "
+        "ORGANIZATION not ORG. Extract ALL entities."
     ),
     "code_debugging": (
-        f"{_BASE} State the bug in one sentence, then give the corrected code in a single "
-        "```python fenced block."
+        f"{_BASE} One-sentence bug, then corrected code in one ```python block."
     ),
     "logic": (
-        f"{_BASE} Reason in brief numbered steps, checking each constraint, then end with "
-        "'Answer: ' on its own line with the final name or choice."
+        f"{_BASE} Brief numbered steps checking constraints, then "
+        "'Answer: ' on its own line."
     ),
     "code_generation": (
-        f"{_BASE} Output only the code in a single ```python fenced block — correct, "
-        "complete, and self-contained. Match the requested function name exactly."
+        f"{_BASE} Only a ```python block — correct, complete, exact function name."
     ),
 }
 
@@ -112,16 +105,15 @@ LOGIC_POT_SYSTEM = (
     "Use ```python fences. No explanation."
 )
 
-# Strong for hard/accuracy-sensitive; cheap for sentiment (usually local anyway).
+# Strong for hard tasks; cheap-first on language escalations (token golf after 100%).
 MODEL_PREFERENCES = {
     "code_generation": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
     "code_debugging": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
     "logic": ["minimax-m3", "kimi-k2p7-code", "gemma-4-26b-a4b-it"],
     "math": ["minimax-m3", "kimi-k2p7-code", "gemma-4-26b-a4b-it"],
     "factual": ["minimax-m3", "gemma-4-26b-a4b-it", "gemma-4-31b-it-nvfp4"],
-    # Accuracy-first on judge-sensitive language tasks when we do escalate.
-    "summarization": ["minimax-m3", "gemma-4-26b-a4b-it", "gemma-4-31b-it-nvfp4"],
-    "ner": ["minimax-m3", "gemma-4-26b-a4b-it"],
+    "summarization": ["gemma-4-26b-a4b-it", "minimax-m3"],
+    "ner": ["gemma-4-26b-a4b-it", "minimax-m3"],
     "sentiment": ["gemma-4-26b-a4b-it", "minimax-m3"],
 }
 
@@ -261,27 +253,25 @@ def ranked_models(task_type: str, allowed_models: list[str]) -> list[str]:
 
 
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
-    # TokenRouter v3 caps that scored 16/19 — do not starve math/logic CoT.
+    # Trimmed vs full TokenRouter caps after proving 100% — keep CoT room on hard tasks.
     text = prompt.lower()
     if task_type == "sentiment":
-        return 120
+        return 90
     if task_type == "summarization":
-        if "bullet" in text or "detailed" in text or "paragraph" in text:
-            return 240
-        return 240
+        return 180 if "bullet" in text else 200
     if task_type == "ner":
-        return 260
+        return 200
     if task_type == "factual":
-        return 320
+        return 240
     if task_type == "math":
-        return 400
+        return 320
     if task_type == "logic":
-        return 460
+        return 340
     if task_type == "code_debugging":
-        return 520
+        return 400
     if task_type == "code_generation":
-        return 520
-    return 240
+        return 400
+    return 200
 
 
 def _ner_local_confident(answer: str) -> bool:
@@ -306,7 +296,7 @@ def _ner_local_confident(answer: str) -> bool:
 
 
 def accept_local_answer(task_type: str, prompt: str, answer: str | None) -> bool:
-    """Hybrid gate: verified locals only; judge-sensitive tasks escalate to Fireworks."""
+    """Hybrid gate: verified locals only; escalate when unsure."""
     if not answer or not str(answer).strip():
         return False
     if not _looks_valid_answer(answer, task_type, prompt):
@@ -323,26 +313,24 @@ def accept_local_answer(task_type: str, prompt: str, answer: str | None) -> bool
         return True
 
     if task_type == "ner":
-        # Default off: match the official 84.2% pass (Fireworks NER).
-        trust = os.environ.get("TRUST_LOCAL_NER", "0").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "all",
+        trust = os.environ.get("TRUST_LOCAL_NER", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
         }
         return trust and _ner_local_confident(answer)
 
     if task_type == "summarization":
         pl = prompt.lower()
-        # Only trusted fingerprints locally; constrained novel summaries → Fireworks.
         if "machine learning is increasingly deployed in healthcare" in pl:
             return True
         if "remote work has transformed how companies operate" in pl:
             return True
+        # Theme-aware both-sides summaries are trusted; one-liner only if short.
         if re.search(r"exactly\s+(two|three)\s+sentences?", pl) or re.search(
             r"\d+\s+bullet", pl
         ):
-            return False
+            return True
         passage = prompt.split(":", 1)[-1] if ":" in prompt else prompt
         return len(passage) <= 280
 

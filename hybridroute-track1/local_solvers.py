@@ -234,6 +234,11 @@ def _fmt_num(value: float) -> str:
 def _solve_math(prompt: str) -> str | None:
     text = prompt.lower().replace(",", "")
 
+    # Bare arithmetic only ("What is 12 * (3 + 4)?") — never word problems.
+    bare = _try_bare_arithmetic(prompt)
+    if bare is not None:
+        return bare
+
     # Warehouse / quarterly inventory (public validation T02).
     wh = re.search(
         r"starts with\s+(\d+).*?sells?\s+(\d+(?:\.\d+)?)\s*%.*?restocks?\s+(\d+).*?sells?\s+(\d+)",
@@ -435,6 +440,31 @@ def _solve_factual(prompt: str) -> str | None:
     return f"The capital of {pretty} is {capital}."
 
 
+def _try_bare_arithmetic(prompt: str) -> str | None:
+    s = prompt.strip().rstrip("?=.").strip()
+    s = re.sub(
+        r"^(what\s+is|what's|calculate|compute|evaluate|solve)\b[:,]?\s*",
+        "",
+        s,
+        flags=re.I,
+    ).strip()
+    s = s.replace("×", "*").replace("÷", "/").replace(",", "").replace("$", "")
+    if not s or len(s) > 80 or not re.fullmatch(r"[0-9+\-*/(). ]+", s):
+        return None
+    if not re.search(r"[+\-*/]", s):
+        return None
+    try:
+        node = compile(s, "<arith>", "eval")
+        if node.co_names:
+            return None
+        val = eval(node, {"__builtins__": {}}, {})  # noqa: S307
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return None
+    return _fmt_num(float(val))
+
+
 def _solve_logic(prompt: str) -> str | None:
     text = prompt.lower()
 
@@ -460,17 +490,127 @@ def _solve_logic(prompt: str) -> str | None:
             if len(last_candidates) == 1:
                 return f"{next(iter(last_candidates))} finished last."
 
-    # 3-person seating brute force
+    ownership = _solve_ownership_logic(prompt)
+    if ownership:
+        return ownership
+
     seating = _solve_three_seat(prompt)
     if seating:
         return seating
 
-    # Exactly-one-true prize labels A/B/C
     prize = _solve_prize_labels(prompt)
     if prize:
         return prize
 
     return None
+
+
+_REL = re.compile(r"\b(owns?|have|has|possess(?:es)?)\b", re.I)
+_NEG = re.compile(r"\b(not|never)\b|n['’]t", re.I)
+_NOT_NAMES = {
+    "the", "a", "an", "who", "what", "which", "when", "where", "why", "how",
+    "if", "each", "every", "no", "none", "one", "two", "three", "four", "five",
+    "both", "neither", "either", "he", "she", "it", "they", "we", "you",
+    "and", "or", "but", "so", "then", "also", "here", "there", "this", "that",
+    "these", "those", "their", "his", "her", "its", "friends", "people",
+}
+_COLON_LIST = re.compile(
+    r":\s*([a-z]+(?:[ ,]+[a-z]+)+)\s*(?:[.?!]|$)", re.I
+)
+_PAREN_LIST = re.compile(r"\(\s*([a-z]+(?:\s*,\s*[a-z]+)+[^)]*)\)", re.I)
+
+
+def _solve_ownership_logic(prompt: str) -> str | None:
+    """Classic 'who owns X' assignment puzzles with one declared domain."""
+    colon = _COLON_LIST.search(prompt)
+    parens = _PAREN_LIST.findall(prompt)
+    if colon and not parens:
+        inner = colon.group(1)
+    elif not colon and len(parens) == 1:
+        inner = parens[0]
+    else:
+        return None
+    values = [
+        w.lower()
+        for w in re.findall(r"[a-zA-Z]+", inner)
+        if w.lower() not in {"a", "an", "the", "and", "or"}
+    ]
+    if not (2 <= len(values) <= 6) or len(set(values)) != len(values):
+        return None
+    valset = set(values)
+
+    people, seen = [], set()
+    for w in re.findall(r"\b[A-Z][a-z]+\b", prompt):
+        low = w.lower()
+        if low in _NOT_NAMES or low in valset or low in seen:
+            continue
+        seen.add(low)
+        people.append(w)
+    if len(people) != len(values):
+        return None
+    by_lower = {p.lower(): p for p in people}
+
+    cons: list[tuple[str, str, bool]] = []
+    queries: list[tuple[str, str]] = []
+    for raw in re.split(r"[.?!]", prompt):
+        s = raw.strip()
+        if not s or not _REL.search(s):
+            continue
+        low = s.lower()
+        if _COLON_LIST.search(s) or _PAREN_LIST.search(s):
+            continue
+        vals_in = [v for v in values if re.search(rf"\b{re.escape(v)}\b", low)]
+        ppl_in = [
+            by_lower[n]
+            for n in by_lower
+            if re.search(rf"\b{re.escape(n)}\b", low)
+        ]
+        if re.search(r"\bwho\b", low):
+            if len(vals_in) == 1 and not ppl_in:
+                queries.append(("who", vals_in[0]))
+                continue
+            return None
+        if "what" in low or "which" in low:
+            if len(ppl_in) == 1 and not vals_in:
+                queries.append(("what", ppl_in[0]))
+                continue
+            return None
+        if len(ppl_in) != 1 or not vals_in:
+            return None
+        person = ppl_in[0]
+        if _NEG.search(low):
+            for v in vals_in:
+                cons.append((person, v, True))
+        else:
+            if len(vals_in) != 1:
+                return None
+            cons.append((person, vals_in[0], False))
+
+    if not cons or not queries:
+        return None
+
+    answer = None
+    consistent = False
+    n = len(people)
+    for perm in itertools.permutations(range(n)):
+        val_of = {people[i]: values[perm[i]] for i in range(n)}
+        who_has = {values[perm[i]]: people[i] for i in range(n)}
+        if any((val_of[p] == v) == neg for p, v, neg in cons):
+            continue
+        consistent = True
+        cur = []
+        for kind, x in queries:
+            if kind == "who":
+                cur.append(f"{who_has[x]} owns the {x}")
+            else:
+                cur.append(f"{x} owns the {val_of[x]}")
+        if answer is None:
+            answer = cur
+        elif cur != answer:
+            return None
+    if not consistent or not answer:
+        return None
+    return ", and ".join(answer) + "."
 
 
 def _solve_three_seat(prompt: str) -> str | None:

@@ -1,11 +1,10 @@
-"""Track 1 batch agent — accuracy-first, then token-efficient.
+"""Track 1 batch agent — accuracy gate first (16/19+), then token golf.
 
-Strategy:
-1. Precise local classification (no model tokens).
-2. Deterministic local solvers only when high-confidence.
-3. Math/logic: program-of-thought via Fireworks + local Python execution.
-4. Code gen/debug: Fireworks code + compile/smoke verification; retries.
-5. Language tasks: Fireworks with tight format prompts + cleanup.
+Proven pattern (TokenRouter-class 16/19):
+- Self-gating local solvers ONLY when the answer cannot be wrong.
+- Strong model + visible brief CoT for math/logic/factual (do not strip steps).
+- Cheap model for sentiment/summary/NER when locals miss.
+- Code model for code. reasoning_effort=none to avoid hidden scored tokens.
 """
 
 from __future__ import annotations
@@ -56,42 +55,44 @@ def time_left() -> float:
 def over_budget(reserve: float = 20.0) -> bool:
     return time_left() <= reserve
 
+# TokenRouter v3-style prompts: brief CoT on hard tasks is required for 16/19.
+_BASE = (
+    "Answer in English. Be concise and direct; no preamble, no restating the question."
+)
+
 SYSTEM_PROMPTS = {
     "factual": (
-        "Answer in English. Be concise and direct; no preamble. "
-        "Give a correct, clear answer in under 120 words covering every asked part."
+        f"{_BASE} Give a correct, clear answer in under 120 words covering every asked part."
     ),
     "math": (
-        "Answer in English. Work through brief calculation steps, then end with "
+        f"{_BASE} Work through it in brief steps, then end with "
         "'Answer: ' on its own line followed by the final number(s)."
     ),
     "sentiment": (
-        "State the sentiment as Positive, Negative, Neutral, or Mixed, then one short reason. "
-        "If the text has BOTH complaints and praise, you MUST use Mixed (or Neutral/Positive), "
-        "never Negative alone, and the reason must mention BOTH sides."
+        f"{_BASE} State the sentiment as Positive, Negative, Neutral, or Mixed, "
+        "then one short reason. If the text has BOTH complaints and praise, you MUST "
+        "use Mixed (never Negative alone) and the reason must mention BOTH sides."
     ),
     "summarization": (
-        "Output ONLY the summary. Obey length/format constraints EXACTLY "
-        "(e.g. exactly N sentences, or exactly N bullets each under W words). "
-        "Cover every required theme from the passage — if both benefits and "
-        "challenges/risks appear, include both."
+        f"{_BASE} Output ONLY the summary and obey any length/format constraint exactly. "
+        "If the passage has both benefits and challenges/risks, include both."
     ),
     "ner": (
-        "List each entity as 'TYPE: text', one per line, using only "
+        f"{_BASE} List each entity as 'TYPE: text', one per line, using only "
         "PERSON, ORGANIZATION, LOCATION, DATE. Use ORGANIZATION not ORG. "
-        "Extract ALL entities. No JSON fences, no preamble."
+        "Extract ALL entities. No fences, no preamble."
     ),
     "code_debugging": (
-        "State the bug in one sentence, then give the corrected code in a single "
-        "```python fenced block. The fixed code must be complete and correct."
+        f"{_BASE} State the bug in one sentence, then give the corrected code in a single "
+        "```python fenced block."
     ),
     "logic": (
-        "Reason in brief numbered steps checking each constraint, then end with "
+        f"{_BASE} Reason in brief numbered steps, checking each constraint, then end with "
         "'Answer: ' on its own line with the final name or choice."
     ),
     "code_generation": (
-        "Output only the code in a single ```python fenced block — correct, "
-        "complete, and self-contained. Use the exact function name requested."
+        f"{_BASE} Output only the code in a single ```python fenced block — correct, "
+        "complete, and self-contained. Match the requested function name exactly."
     ),
 }
 
@@ -107,16 +108,17 @@ LOGIC_POT_SYSTEM = (
     "Use ```python fences. No explanation."
 )
 
+# Cheap → language; strong → reasoning; code → code. Matched against ALLOWED_MODELS.
 MODEL_PREFERENCES = {
-    # Proven: strong general (minimax) for reasoning; code model for code; avoid empty-content traps.
     "code_generation": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
     "code_debugging": ["kimi-k2p7-code", "minimax-m3", "gemma-4-26b-a4b-it"],
     "logic": ["minimax-m3", "kimi-k2p7-code", "gemma-4-26b-a4b-it"],
     "math": ["minimax-m3", "kimi-k2p7-code", "gemma-4-26b-a4b-it"],
     "factual": ["minimax-m3", "gemma-4-26b-a4b-it", "gemma-4-31b-it-nvfp4"],
-    "summarization": ["minimax-m3", "gemma-4-26b-a4b-it"],
-    "sentiment": ["minimax-m3", "gemma-4-26b-a4b-it"],
-    "ner": ["minimax-m3", "gemma-4-26b-a4b-it"],
+    # Cheap-first for token golf after accuracy (TokenRouter 16/19 pattern).
+    "summarization": ["gemma-4-26b-a4b-it", "minimax-m3", "gemma-4-31b-it-nvfp4"],
+    "sentiment": ["gemma-4-26b-a4b-it", "minimax-m3"],
+    "ner": ["gemma-4-26b-a4b-it", "minimax-m3"],
 }
 
 
@@ -255,26 +257,27 @@ def ranked_models(task_type: str, allowed_models: list[str]) -> list[str]:
 
 
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
+    # Caps aligned to TokenRouter v3 (16/19). Do not starve math/logic CoT.
     text = prompt.lower()
     if task_type == "sentiment":
-        return 100
+        return 120
     if task_type == "summarization":
         if "bullet" in text or "detailed" in text or "paragraph" in text:
-            return 220
-        return 200
+            return 260
+        return 240
     if task_type == "ner":
-        return 220
+        return 260
     if task_type == "factual":
-        return 280
+        return 320
     if task_type == "math":
-        return 360
-    if task_type == "logic":
         return 400
+    if task_type == "logic":
+        return 460
     if task_type == "code_debugging":
-        return 480
+        return 520
     if task_type == "code_generation":
-        return 480
-    return 200
+        return 520
+    return 240
 
 
 def resolve_api_model(model: str) -> str:
@@ -602,7 +605,17 @@ def process_task(
     if over_budget(15.0):
         return {"task_id": task["task_id"], "answer": FALLBACK_ANSWER}
 
-    local_answer = try_local_solve(task_type, prompt)
+    # NER: prefer Fireworks (cheap tier) — partial local extractions look valid but
+    # miss entities and fail the judge. Opt in with TRUST_LOCAL_NER=1.
+    trust_local_ner = os.environ.get("TRUST_LOCAL_NER", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "all",
+    }
+    local_answer = None
+    if task_type != "ner" or trust_local_ner:
+        local_answer = try_local_solve(task_type, prompt)
     if local_answer and _looks_valid_answer(local_answer, task_type, prompt):
         LOCAL_SOLVES += 1
         return {"task_id": task["task_id"], "answer": local_answer}

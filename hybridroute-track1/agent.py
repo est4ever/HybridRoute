@@ -73,16 +73,17 @@ SYSTEM_PROMPTS = {
     "summarization": (
         "Output ONLY the summary. Obey length/format constraints EXACTLY "
         "(e.g. exactly N sentences, or exactly N bullets each under W words). "
-        "Cover every required theme."
+        "Cover every required theme from the passage — if both benefits and "
+        "challenges/risks appear, include both."
     ),
     "ner": (
         "List each entity as 'TYPE: text', one per line, using only "
         "PERSON, ORGANIZATION, LOCATION, DATE. Use ORGANIZATION not ORG. "
-        "No JSON fences, no preamble."
+        "Extract ALL entities. No JSON fences, no preamble."
     ),
     "code_debugging": (
         "State the bug in one sentence, then give the corrected code in a single "
-        "```python fenced block."
+        "```python fenced block. The fixed code must be complete and correct."
     ),
     "logic": (
         "Reason in brief numbered steps checking each constraint, then end with "
@@ -90,7 +91,7 @@ SYSTEM_PROMPTS = {
     ),
     "code_generation": (
         "Output only the code in a single ```python fenced block — correct, "
-        "complete, and self-contained."
+        "complete, and self-contained. Use the exact function name requested."
     ),
 }
 
@@ -256,24 +257,24 @@ def ranked_models(task_type: str, allowed_models: list[str]) -> list[str]:
 def max_tokens_for_task(task_type: str, prompt: str) -> int:
     text = prompt.lower()
     if task_type == "sentiment":
-        return 120
+        return 100
     if task_type == "summarization":
         if "bullet" in text or "detailed" in text or "paragraph" in text:
-            return 260
-        return 240
+            return 220
+        return 200
     if task_type == "ner":
-        return 260
+        return 220
     if task_type == "factual":
-        return 320
+        return 280
     if task_type == "math":
-        return 400
+        return 360
     if task_type == "logic":
-        return 460
+        return 400
     if task_type == "code_debugging":
-        return 520
+        return 480
     if task_type == "code_generation":
-        return 520
-    return 240
+        return 480
+    return 200
 
 
 def resolve_api_model(model: str) -> str:
@@ -681,6 +682,21 @@ def process_task(
             return {"task_id": task["task_id"], "answer": code_ans}
 
     max_tokens = max_tokens_for_task(task_type, prompt)
+    user_content = prompt
+    if task_type in {"math", "logic"}:
+        user_content = (
+            f"{prompt}\n\nAfter reasoning, end with a line: Answer: <final result>"
+        )
+    elif task_type == "summarization":
+        user_content = (
+            f"{prompt}\n\nFollow the format exactly. If the passage has both upsides "
+            f"and downsides, the summary must mention both."
+        )
+    elif task_type == "ner":
+        user_content = (
+            f"{prompt}\n\nInclude every PERSON, ORGANIZATION, LOCATION, and DATE."
+        )
+
     for attempt, candidate in enumerate(candidates[:max_fallbacks], start=1):
         if over_budget(20.0):
             break
@@ -694,7 +710,10 @@ def process_task(
             raw = call_fireworks(
                 client,
                 candidate,
-                [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content},
+                ],
                 max_tokens,
             )
             if not str(raw).strip():

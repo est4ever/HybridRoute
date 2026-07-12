@@ -7,8 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py local_solvers.py code_exec.py local_llm.py .
 
-# Accuracy-first hybrid: verified local solvers at 0 tokens, Fireworks for the rest.
-# Moonshot (0-token only) scored 52.6% on the official set — do not default to it.
+# Default: NO bundled GGUF. The 4GB harness OOMs / times out loading ~1GB models.
+# Deterministic solvers handle the proxy set at 0 tokens; Fireworks covers the rest.
 ENV LOCAL_SOLVER_MODE=all \
     MAX_WORKERS=1 \
     MAX_MODEL_FALLBACKS=3 \

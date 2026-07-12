@@ -1,13 +1,11 @@
-"""Track 1 batch agent — accuracy-first hybrid, then token-efficient.
+"""Track 1 batch agent — accuracy-first, then token-efficient.
 
 Strategy:
 1. Precise local classification (no model tokens).
-2. High-confidence deterministic local solvers only (self-gating; never guess).
+2. Deterministic local solvers only when high-confidence.
 3. Math/logic: program-of-thought via Fireworks + local Python execution.
 4. Code gen/debug: Fireworks code + compile/smoke verification; retries.
 5. Language tasks: Fireworks with tight format prompts + cleanup.
-Moonshot MODE exists for experiments but must not ship as default — official
-scoring showed forced zero-token guesses collapsing accuracy to ~52%.
 """
 
 from __future__ import annotations
@@ -61,13 +59,11 @@ def over_budget(reserve: float = 20.0) -> bool:
 SYSTEM_PROMPTS = {
     "factual": (
         "Answer in English. Be concise and direct; no preamble. "
-        "Give a correct, clear answer in under 120 words covering every asked part. "
-        "Prefer precise facts, names, numbers, and definitions the grader expects."
+        "Give a correct, clear answer in under 120 words covering every asked part."
     ),
     "math": (
         "Answer in English. Work through brief calculation steps, then end with "
-        "'Answer: ' on its own line followed by the final number(s). "
-        "Do not omit units if asked; double-check arithmetic."
+        "'Answer: ' on its own line followed by the final number(s)."
     ),
     "sentiment": (
         "State the sentiment as Positive, Negative, Neutral, or Mixed, then one short reason. "
@@ -77,16 +73,16 @@ SYSTEM_PROMPTS = {
     "summarization": (
         "Output ONLY the summary. Obey length/format constraints EXACTLY "
         "(e.g. exactly N sentences, or exactly N bullets each under W words). "
-        "Cover every required theme from the passage (benefits AND challenges when both appear)."
+        "Cover every required theme."
     ),
     "ner": (
         "List each entity as 'TYPE: text', one per line, using only "
         "PERSON, ORGANIZATION, LOCATION, DATE. Use ORGANIZATION not ORG. "
-        "No JSON fences, no preamble. Extract ALL entities present."
+        "No JSON fences, no preamble."
     ),
     "code_debugging": (
         "State the bug in one sentence, then give the corrected code in a single "
-        "```python fenced block. The corrected code must be complete and runnable."
+        "```python fenced block."
     ),
     "logic": (
         "Reason in brief numbered steps checking each constraint, then end with "
@@ -94,7 +90,7 @@ SYSTEM_PROMPTS = {
     ),
     "code_generation": (
         "Output only the code in a single ```python fenced block — correct, "
-        "complete, and self-contained. Match the requested function name exactly."
+        "complete, and self-contained."
     ),
 }
 
@@ -640,17 +636,14 @@ def process_task(
                     LOCAL_LLM_SOLVES += 1
                     return {"task_id": task["task_id"], "answer": cleaned_local}
 
-    # Moonshot: never spend Fireworks tokens. Only use verified locals / sentiment;
-    # do NOT ship force-guesses (they collapsed official accuracy to 52.6%).
+    # Moonshot: never spend Fireworks tokens (accuracy risk; best token score if it passes).
     mode = os.environ.get("MODE", "hybrid").strip().lower()
     if mode in {"moonshot", "local_only", "zero"}:
-        if local_answer and _looks_valid_answer(local_answer, task_type, prompt):
-            return {"task_id": task["task_id"], "answer": local_answer}
         if task_type == "sentiment":
             return {"task_id": task["task_id"], "answer": _sentiment_fallback(prompt)}
         return {
             "task_id": task["task_id"],
-            "answer": FALLBACK_ANSWER,
+            "answer": local_answer or FALLBACK_ANSWER,
         }
 
     candidates = [
@@ -688,21 +681,6 @@ def process_task(
             return {"task_id": task["task_id"], "answer": code_ans}
 
     max_tokens = max_tokens_for_task(task_type, prompt)
-    user_content = prompt
-    if task_type in {"math", "logic"}:
-        user_content = (
-            f"{prompt}\n\nAfter your reasoning, put the final result on its own line as "
-            f"'Answer: <result>'."
-        )
-    elif task_type == "summarization":
-        user_content = (
-            f"{prompt}\n\nObey the requested format exactly and include the key themes."
-        )
-    elif task_type == "ner":
-        user_content = (
-            f"{prompt}\n\nReturn every PERSON, ORGANIZATION, LOCATION, and DATE entity."
-        )
-
     for attempt, candidate in enumerate(candidates[:max_fallbacks], start=1):
         if over_budget(20.0):
             break
@@ -716,10 +694,7 @@ def process_task(
             raw = call_fireworks(
                 client,
                 candidate,
-                [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_content},
-                ],
+                [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
                 max_tokens,
             )
             if not str(raw).strip():

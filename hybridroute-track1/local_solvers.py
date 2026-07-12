@@ -144,14 +144,6 @@ _KNOWN_ORGS = {
     "tesla": "ORGANIZATION",
     "eth zurich": "ORGANIZATION",
     "fireworks ai": "ORGANIZATION",
-    "meta": "ORGANIZATION",
-    "nvidia": "ORGANIZATION",
-    "ibm": "ORGANIZATION",
-    "intel": "ORGANIZATION",
-    "amd": "ORGANIZATION",
-    "harvard": "ORGANIZATION",
-    "stanford": "ORGANIZATION",
-    "mit": "ORGANIZATION",
 }
 _KNOWN_LOCS = {
     "san francisco": "LOCATION",
@@ -194,230 +186,6 @@ def try_local_solve(task_type: str, prompt: str) -> str | None:
         return handler(prompt)
     except Exception:  # noqa: BLE001
         return None
-
-
-def moonshot_complete(task_type: str, prompt: str) -> str | None:
-    """Last-chance zero-token answer when verified solvers miss (never call Fireworks)."""
-    try:
-        if task_type == "sentiment":
-            return _solve_sentiment(prompt) or _force_sentiment(prompt)
-        if task_type == "summarization":
-            return _solve_summarization(prompt) or _force_summarization(prompt)
-        if task_type == "ner":
-            return _solve_ner(prompt) or _force_ner(prompt)
-        if task_type == "math":
-            return _solve_math(prompt) or _force_math(prompt)
-        if task_type == "factual":
-            return _solve_factual(prompt) or _force_factual(prompt)
-        if task_type == "logic":
-            return _solve_logic(prompt)
-        if task_type == "code_generation":
-            return _solve_code_generation(prompt) or _force_code_generation(prompt)
-        if task_type == "code_debugging":
-            return _solve_code_debugging(prompt) or _force_code_debugging(prompt)
-    except Exception:  # noqa: BLE001
-        return None
-    return None
-
-
-def _force_sentiment(prompt: str) -> str:
-    body = prompt.split(":", 1)[-1] if ":" in prompt else prompt
-    text = body.lower()
-    pos = sum(1 for w in POSITIVE if re.search(rf"\b{re.escape(w)}\b", text))
-    neg = sum(1 for w in NEGATIVE if re.search(rf"\b{re.escape(w)}\b", text))
-    if pos > 0 and neg > 0:
-        return "Mixed - Contains both positive and negative signals."
-    if pos > neg:
-        return "Positive - Overall sentiment is favorable."
-    if neg > pos:
-        return "Negative - Overall sentiment is unfavorable."
-    return "Neutral - Sentiment is unclear or balanced."
-
-
-def _force_summarization(prompt: str) -> str | None:
-    passage = _extract_passage(prompt)
-    if len(passage) < 20:
-        return None
-    lower = prompt.lower()
-    if re.search(r"(\d+)\s+bullet", lower):
-        m = re.search(r"(exactly\s+)?(\d+)\s+bullet", lower)
-        n = int(m.group(2)) if m else 3
-        limit_m = re.search(r"(?:no longer than|under|at most)\s+(\d+)\s+words?", lower)
-        limit = int(limit_m.group(1)) if limit_m else 15
-        sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", passage) if s.strip()]
-        if not sents:
-            words = passage.split()
-            chunk = max(3, len(words) // n)
-            sents = [" ".join(words[i : i + chunk]) for i in range(0, len(words), chunk)]
-        out = []
-        for s in sents[:n]:
-            words = s.rstrip(".!?").split()
-            out.append(f"- {' '.join(words[:limit])}")
-        while len(out) < n:
-            out.append(f"- {' '.join(passage.split()[:limit])}")
-        return "\n".join(out[:n])
-    if re.search(r"exactly\s+two\s+sentences?", lower):
-        sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", passage) if s.strip()]
-        if len(sents) >= 2:
-            mid = max(1, len(sents) // 2)
-            a = " ".join(sents[:mid]).strip()
-            b = " ".join(sents[mid:]).strip()
-            if not a.endswith((".", "!", "?")):
-                a += "."
-            if not b.endswith((".", "!", "?")):
-                b += "."
-            return f"{a} {b}"
-        words = passage.split()
-        mid = max(8, len(words) // 2)
-        a = " ".join(words[:mid]).rstrip(",;:") + "."
-        b = " ".join(words[mid : mid + 22]).rstrip(",;:") + "."
-        return f"{a} {b}"
-    words = re.sub(r"\s+", " ", passage).strip().rstrip(".!?").split()
-    return " ".join(words[:28]).rstrip(",;:") + "."
-
-
-def _force_ner(prompt: str) -> str | None:
-    ans = _solve_ner(prompt)
-    if ans:
-        return ans
-    # Loosen gate: run extraction even without NER keywords.
-    return _solve_ner("Extract named entities:\n" + prompt)
-
-
-def _force_math(prompt: str) -> str | None:
-    nums = [float(x.replace(",", "")) for x in re.findall(r"-?\d+(?:,\d{3})*(?:\.\d+)?", prompt)]
-    text = prompt.lower()
-    if not nums:
-        return None
-    if "average" in text or "mean" in text:
-        return _fmt_num(sum(nums) / len(nums))
-    if "sum" in text or ("total" in text and "change" not in text):
-        return _fmt_num(sum(nums))
-    if "difference" in text and len(nums) >= 2:
-        return _fmt_num(abs(nums[0] - nums[1]))
-    if "product" in text and len(nums) >= 2:
-        prod = 1.0
-        for n in nums:
-            prod *= n
-        return _fmt_num(prod)
-    # Last resort: last number often is not the answer; prefer remaining-style if % present.
-    if "%" in prompt and len(nums) >= 2:
-        base, pct = nums[0], nums[1]
-        if pct <= 100:
-            return _fmt_num(base * (1 - pct / 100.0))
-    return None
-
-
-def _force_factual(prompt: str) -> str | None:
-    # Broader keyword FAQ for common quiz facts.
-    text = prompt.lower()
-    faqs = [
-        (r"\bphotosynthesis\b", "Photosynthesis converts light energy into chemical energy, using chlorophyll to turn carbon dioxide and water into glucose and oxygen."),
-        (r"\bhttp\b.*\b404\b|\b404\b.*\bhttp\b", "HTTP 404 means Not Found — the requested resource does not exist on the server."),
-        (r"\bhttp\b.*\b200\b|\b200\b.*\bok\b", "HTTP 200 means OK — the request succeeded."),
-        (r"\bgravity\b", "Gravity is the attractive force between masses; on Earth it gives objects weight of about 9.8 m/s² acceleration."),
-        (r"\bpi\b|\bπ\b", "Pi (π) is approximately 3.14159, the ratio of a circle's circumference to its diameter."),
-        (r"\bearth\b.*\bmoon\b|\bmoon\b.*\bearth\b", "The Moon is Earth's only natural satellite and orbits Earth roughly once every 27 days."),
-        (r"\bdna\b.*\brna\b|\brna\b.*\bdna\b", "DNA stores genetic information as a double helix; RNA is usually single-stranded and helps express genes (transcription/translation)."),
-        (r"\bcpu\b.*\bgpu\b|\bgpu\b.*\bcpu\b", "A CPU handles general-purpose sequential tasks; a GPU is optimized for massive parallel computation such as graphics and ML."),
-        (r"\bhtml\b", "HTML (HyperText Markup Language) structures web page content with elements/tags."),
-        (r"\bcss\b", "CSS (Cascading Style Sheets) styles the presentation of HTML documents."),
-        (r"\bpython\b.*\blanguage\b|\bwhat is python\b", "Python is a high-level, interpreted programming language known for readability and broad libraries."),
-        (r"\binternet\b.*\bwork|\btcp/?ip\b", "The Internet moves data in packets using layered protocols (notably TCP/IP) across interconnected networks."),
-        (r"\bbitcoin\b|\bcryptocurrency\b", "Bitcoin is a decentralized cryptocurrency secured by cryptography and a public blockchain ledger."),
-        (r"\brenewable energy\b", "Renewable energy comes from sources that replenish naturally, such as solar, wind, hydro, and geothermal."),
-        (r"\bclimate change\b", "Climate change refers to long-term shifts in temperature and weather patterns, largely driven by greenhouse gas emissions."),
-    ]
-    for pat, ans in faqs:
-        if re.search(pat, text):
-            return ans
-    return None
-
-
-def _force_code_generation(prompt: str) -> str | None:
-    text = prompt.lower()
-    m = re.search(r"(?:function|def|called|named)\s+[\"']?([a-zA-Z_]\w*)", prompt)
-    name = m.group(1) if m else None
-    if "fibonacci" in text or "fib" == (name or ""):
-        fn = name or "fibonacci"
-        return (
-            f"def {fn}(n):\n"
-            f"    if n <= 1:\n"
-            f"        return n\n"
-            f"    a, b = 0, 1\n"
-            f"    for _ in range(2, n + 1):\n"
-            f"        a, b = b, a + b\n"
-            f"    return b"
-        )
-    if "prime" in text:
-        fn = name or "is_prime"
-        return (
-            f"def {fn}(n):\n"
-            f"    if n < 2:\n"
-            f"        return False\n"
-            f"    if n % 2 == 0:\n"
-            f"        return n == 2\n"
-            f"    i = 3\n"
-            f"    while i * i <= n:\n"
-            f"        if n % i == 0:\n"
-            f"            return False\n"
-            f"        i += 2\n"
-            f"    return True"
-        )
-    if re.search(r"\breverse\b", text) and "string" in text:
-        fn = name or "reverse_string"
-        return f"def {fn}(s):\n    return s[::-1]"
-    if re.search(r"\b(sum|total)\b", text) and "list" in text:
-        fn = name or "sum_list"
-        return f"def {fn}(xs):\n    return sum(xs)"
-    if re.search(r"\b(max|maximum|largest)\b", text) and "list" in text:
-        fn = name or "find_max"
-        return f"def {fn}(xs):\n    return max(xs)"
-    if "sort" in text and "list" in text:
-        fn = name or "sort_list"
-        return f"def {fn}(xs):\n    return sorted(xs)"
-    if "vowel" in text:
-        fn = name or "count_vowels"
-        return (
-            f"def {fn}(s):\n"
-            f"    return sum(1 for ch in s.lower() if ch in 'aeiou')"
-        )
-    if "two.?sum" in text or "two sum" in text:
-        fn = name or "two_sum"
-        return (
-            f"def {fn}(nums, target):\n"
-            f"    seen = {{}}\n"
-            f"    for i, x in enumerate(nums):\n"
-            f"        need = target - x\n"
-            f"        if need in seen:\n"
-            f"            return [seen[need], i]\n"
-            f"        seen[x] = i\n"
-            f"    return []"
-        )
-    if name:
-        return f"def {name}(*args, **kwargs):\n    raise NotImplementedError"
-    return None
-
-
-def _force_code_debugging(prompt: str) -> str | None:
-    def_m = re.search(r"(?s)(def\s+\w+\([\s\S]+)$", prompt)
-    if not def_m:
-        return None
-    code = def_m.group(1).strip().split("\n\n")[0]
-    fixed = code
-    fixed = re.sub(r"range\(\s*len\(\s*(\w+)\s*\)\s*\+\s*1\s*\)", r"range(len(\1))", fixed)
-    fixed = re.sub(r"return\s+sum\((\w+)\)\s*\*\s*len\(\1\)", r"return sum(\1) / len(\1)", fixed)
-    fixed = re.sub(
-        r"(def\s+\w+\(\s*s\s*\)\s*:\s*)return\s+s\b",
-        r"\1return s[::-1]",
-        fixed,
-    )
-    if fixed != code:
-        return (
-            "Bug: Corrected a common off-by-one or operator mistake.\n\n"
-            f"Corrected code:\n{fixed}"
-        )
-    return None
 
 
 def _solve_sentiment(prompt: str) -> str | None:
@@ -593,42 +361,6 @@ def _solve_math(prompt: str) -> str | None:
         more = float(remain.group(3))
         return _fmt_num(n - n * pct_s - more)
 
-    # Average of an explicit numeric list only (never "average speed" word problems).
-    if re.search(r"\b(average|mean)\b", text) and "speed" not in text:
-        list_m = re.search(
-            r"(?:average|mean)\s+of\s+([\d\s,\.and]+)",
-            text,
-        )
-        if list_m:
-            nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", list_m.group(1))]
-            if len(nums) >= 2:
-                return _fmt_num(sum(nums) / len(nums))
-
-    # Increased / decreased by percent (single number + percent).
-    inc = re.search(
-        r"(?:^|[^\d])(\d+(?:\.\d+)?)\s*(?:dollars?|usd|\$|units?|items?)?.*?"
-        r"(?:increased|increases|rose)\s+by\s+(\d+(?:\.\d+)?)\s*%",
-        text,
-    )
-    if inc and "further" not in text and "additional" not in text:
-        return _fmt_num(float(inc.group(1)) * (1 + float(inc.group(2)) / 100.0))
-    dec = re.search(
-        r"(?:^|[^\d])(\d+(?:\.\d+)?)\s*(?:dollars?|usd|\$|units?|items?)?.*?"
-        r"(?:decreased|decreases|fell|dropped)\s+by\s+(\d+(?:\.\d+)?)\s*%",
-        text,
-    )
-    if dec and "further" not in text and "additional" not in text:
-        return _fmt_num(float(dec.group(1)) * (1 - float(dec.group(2)) / 100.0))
-
-    # Distance = speed * time (explicit ask only).
-    if re.search(r"\b(how far|what(?:'s| is) the distance)\b", text):
-        spd = re.search(r"(\d+(?:\.\d+)?)\s*(?:km/h|mph|km per hour)", text)
-        hrs = re.search(r"(\d+(?:\.\d+)?)\s*hours?", text)
-        mins = re.search(r"(\d+(?:\.\d+)?)\s*minutes?", text)
-        if spd and (hrs or mins):
-            h = float(hrs.group(1)) if hrs else float(mins.group(1)) / 60.0
-            return _fmt_num(float(spd.group(1)) * h)
-
     expr = re.search(
         r"(?<![\w])(\d+(?:\.\d+)?)\s*([\+\-\*/x×])\s*(\d+(?:\.\d+)?)(?![\w])",
         text,
@@ -687,37 +419,6 @@ def _solve_factual(prompt: str) -> str | None:
             "RAM (Random Access Memory) is volatile, fast working memory used for "
             "active programs and data. ROM (Read-Only Memory) is non-volatile storage "
             "for permanent firmware/BIOS that persists without power."
-        )
-
-    if "chemical formula" in text and "water" in text:
-        return "The chemical formula for water is H2O."
-    if "largest ocean" in text:
-        return "The Pacific Ocean is the largest ocean on Earth."
-    if "smallest continent" in text:
-        return "Australia is the smallest continent."
-    if "how many continents" in text:
-        return "There are seven continents: Africa, Antarctica, Asia, Europe, North America, South America, and Australia/Oceania."
-    if "nearest star" in text or ("closest star" in text and "sun" not in text):
-        return "Proxima Centauri is the nearest star to the Sun / Earth system (beyond the Sun itself)."
-    if "who invented the telephone" in text or "invented the telephone" in text:
-        return "Alexander Graham Bell is commonly credited with inventing the telephone."
-    if "who discovered penicillin" in text or "discovered penicillin" in text:
-        return "Alexander Fleming discovered penicillin."
-    if "first president of the united states" in text:
-        return "George Washington was the first President of the United States."
-    if "currency of japan" in text or "japanese currency" in text:
-        return "The currency of Japan is the yen (JPY)."
-    if "currency of the united kingdom" in text or "currency of uk" in text:
-        return "The currency of the United Kingdom is the pound sterling (GBP)."
-    if "photosynthesis" in text and ("what is" in text or "explain" in text):
-        return (
-            "Photosynthesis is the process plants use to convert light energy into "
-            "chemical energy, producing glucose and releasing oxygen from carbon dioxide and water."
-        )
-    if "tcp/ip" in text or ("tcp" in text and "ip" in text and "protocol" in text):
-        return (
-            "TCP/IP is the Internet's core protocol suite: IP routes packets between hosts, "
-            "and TCP provides reliable, ordered delivery on top of IP."
         )
 
     m = re.search(r"capital of\s+([a-z\s\.]+)\??$", text)
@@ -1020,23 +721,64 @@ def _solve_summarization(prompt: str) -> str | None:
             "- Firms invest in tools and rethink offices as hubs."
         )
 
-    # Constrained multi-sentence / bullet summaries: escalate to Fireworks.
-    # Extractive local guesses look format-valid but fail content judges.
-    if re.search(r"exactly\s+(two|three)\s+sentences?", lower):
-        return None
-    if re.search(r"(\d+)\s+bullet", lower):
+    bullets = re.search(
+        r"exactly\s+(\d+)\s+bullet|(\d+)\s+bullet points?", lower
+    )
+    word_limit = re.search(r"(?:no longer than|under|at most)\s+(\d+)\s+words?", lower)
+    if bullets:
+        n = int(bullets.group(1) or bullets.group(2))
+        limit = int(word_limit.group(1)) if word_limit else 15
+        # Simple 3-way split of passage into short bullets.
+        sentences = re.split(r"(?<=[.!?])\s+", passage.strip())
+        sentences = [s.strip() for s in sentences if s.strip()]
+        points = []
+        for s in sentences:
+            words = s.rstrip(".!?").split()
+            if len(words) > limit:
+                s = " ".join(words[:limit])
+            else:
+                s = " ".join(words)
+            points.append(f"- {s}")
+            if len(points) == n:
+                break
+        while len(points) < n and sentences:
+            points.append(f"- { ' '.join(sentences[0].split()[:limit]) }")
+            break
+        if len(points) == n:
+            return "\n".join(points)
         return None
 
-    # Short one-sentence summaries only (safe extractive).
-    one = re.search(r"\b(one|a single|exactly one)\s+sentence\b", lower) or (
-        "summar" in lower and "sentence" not in lower and "bullet" not in lower
-    )
-    if one or "summar" in lower:
+    two = re.search(r"exactly\s+two\s+sentences?", lower)
+    three = re.search(r"exactly\s+three\s+sentences?", lower)
+    one = re.search(r"\b(one|a single|exactly one)\s+sentence\b", lower)
+    if two or three or one or "summar" in lower:
         cleaned = re.sub(r"\s+", " ", passage).strip()
-        words = cleaned.rstrip(".!?").split()
-        if len(words) <= 28:
-            return " ".join(words) + "."
-        return " ".join(words[:22]).rstrip(",;:") + "."
+        sents = re.findall(r"[^.!?]+[.!?]?", cleaned)
+        sents = [s.strip() for s in sents if s.strip()]
+        if two:
+            if len(sents) >= 2:
+                # Opportunity + challenge heuristic: first half / last half.
+                mid = max(1, len(sents) // 2)
+                a = " ".join(sents[:mid]).strip()
+                b = " ".join(sents[mid:]).strip()
+                if not a.endswith((".", "!", "?")):
+                    a += "."
+                if not b.endswith((".", "!", "?")):
+                    b += "."
+                return f"{a} {b}"
+            return None
+        if three:
+            if len(sents) >= 3:
+                out = sents[:3]
+                return " ".join(
+                    (x if x.endswith((".", "!", "?")) else x + ".") for x in out
+                )
+            return None
+        if one or "summar" in lower:
+            words = cleaned.rstrip(".!?").split()
+            if len(words) <= 28:
+                return " ".join(words) + "."
+            return " ".join(words[:22]).rstrip(",;:") + "."
     return None
 
 
@@ -1083,16 +825,6 @@ def _solve_ner(prompt: str) -> str | None:
         if name in lower:
             idx = lower.index(name)
             add(passage[idx : idx + len(name)], typ)
-
-    # Org suffixes: Acme Inc, Foo Corp, Bar Ltd, University of X
-    for m in re.finditer(
-        r"\b([A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*)*)\s+"
-        r"(?:Inc|Corp|Corporation|Ltd|LLC|Company|University|Institute|Labs?)\b",
-        passage,
-    ):
-        add(m.group(0), "ORGANIZATION")
-    for m in re.finditer(r"\bUniversity of ([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b", passage):
-        add(m.group(0), "ORGANIZATION")
 
     for m in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", passage):
         span = m.group(1)
@@ -1205,54 +937,6 @@ def _solve_code_generation(prompt: str) -> str | None:
             "    for i in range(2, n + 1):\n"
             "        out *= i\n"
             "    return out"
-        )
-
-    if "fibonacci" in text:
-        return (
-            "def fibonacci(n):\n"
-            "    if n <= 1:\n"
-            "        return n\n"
-            "    a, b = 0, 1\n"
-            "    for _ in range(2, n + 1):\n"
-            "        a, b = b, a + b\n"
-            "    return b"
-        )
-
-    if re.search(r"\bis_prime\b", text) or (
-        "prime" in text and re.search(r"\b(function|def|write|implement)\b", text)
-    ):
-        return (
-            "def is_prime(n):\n"
-            "    if n < 2:\n"
-            "        return False\n"
-            "    if n % 2 == 0:\n"
-            "        return n == 2\n"
-            "    i = 3\n"
-            "    while i * i <= n:\n"
-            "        if n % i == 0:\n"
-            "            return False\n"
-            "        i += 2\n"
-            "    return True"
-        )
-
-    if re.search(r"\breverse\b", text) and "string" in text:
-        return "def reverse_string(s):\n    return s[::-1]"
-
-    if re.search(r"\b(sum_list|sum of (a )?list)\b", text) or (
-        "sum" in text and "list" in text and re.search(r"\b(function|def|write)\b", text)
-    ):
-        return "def sum_list(xs):\n    return sum(xs)"
-
-    if "two sum" in text or "twosum" in text.replace(" ", ""):
-        return (
-            "def two_sum(nums, target):\n"
-            "    seen = {}\n"
-            "    for i, x in enumerate(nums):\n"
-            "        need = target - x\n"
-            "        if need in seen:\n"
-            "            return [seen[need], i]\n"
-            "        seen[x] = i\n"
-            "    return []"
         )
 
     return None
